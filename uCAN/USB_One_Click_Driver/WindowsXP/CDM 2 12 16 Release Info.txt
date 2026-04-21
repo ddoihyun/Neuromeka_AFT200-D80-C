@@ -1,0 +1,679 @@
+FTDI CDM Drivers 2.12.16 - Revision Comments 
+
+FTDI’s CDM drivers provide both D2XX and VCP functionality through a single driver package on PCs running the following Windows operating systems:
+•	Windows 10
+•	Windows 10 x64
+•	Windows 8.1
+•	Windows 8.1 x64
+•	Windows Server 2012
+•	Windows 8
+•	Windows 8 x64
+•	Windows Server 2008 R2
+•	Windows 7
+•	Windows 7 x64
+•	Windows Server 2008
+•	Windows Server 2008 x64
+•	Windows Vista
+•	Windows Vista x64 
+•	Windows Server 2003
+•	Windows Server 2003 x64
+•	Windows XP
+•	Windows XP x64
+
+The files included in a standard CDM release are:
+•	Installation files
+o	FTDIBUS.INF
+o	FTDIPORT.INF
+•	Driver files
+o	FTDIBUS.SYS (32-bit) 
+o	FTDIBUS.SYS (64-bit)
+o	FTSER2K.SYS (32-bit)
+o	FTSER2K.SYS (64-bit)
+•	D2XX Interface
+o	FTD2XX.H 
+o	Dynamic library
+	FTD2XX.DLL (32-bit)
+	FTD2XX.DLL (64-bit)
+	FTD2XX.LIB (32-bit)
+	FTD2XX.LIB (64-bit)
+o	Static library
+	FTD2XX.LIB (32-bit)
+	FTD2XX.LIB (64-bit)
+•	Supporting files
+o	FTLang.DLL (32-bit)
+o	FTLang.DLL (64-bit)
+o	FTCSERCO.DLL (32-bit)
+o	FTCSERCO.DLL (64-bit)
+
+
+On making a new release the files will be posted on FTDI’s web site http://www.ftdichip.com/FTDrivers.htm in ZIP file format.
+
+
+
+Release version
+
+2.12.16 (March 16, 2016)
+WHQL certified release.
+
+Release Fixes
+
+•	Fixed problem with serial number string returned from D2XX API functions when serial number bit is not set in EEPROM.
+
+
+Release version
+
+2.12.14 (January 22, 2016)
+Maintenance release.
+
+Release Fixes
+
+•	Removed error return for invalid arguments passed to FT_SetUSBParameters for backward compatibility.
+
+
+Release version
+
+2.12.12 (January 12, 2016)
+WHQL certified release.
+
+Release Fixes
+
+•	Support for FT900-series devices.
+
+
+Release version
+
+2.12.10 (November 19, 2015)
+WHQL certified release.
+
+Release Fixes
+
+•	Maintenance release.
+
+
+Release version
+
+2.12.06 (July 24, 2015)
+WHQL certified release.
+
+Release Fixes
+
+•	Certification achieved for Windows 10.
+
+
+Release version
+
+2.12.06 (July 14, 2015)
+WHQL certified release.
+
+Release Fixes
+
+•	Fix for device strings problem on multi-channel devices.
+
+
+Release version
+
+2.12.04 (July 1, 2015)
+WHQL certified release.
+
+Release Fixes
+
+•	Fix for enumeration problem on some hub configurations.
+•	Fixed virtual COM port selective suspend problem.
+
+
+Release version
+
+2.12.00 (September 10, 2014)
+WHQL certified release.
+
+Release Fixes
+
+•	Support for FT4222.
+
+
+Release version
+
+2.10.00 (January 31, 2014)
+WHQL certified release.
+
+Release Fixes
+
+•	Support for Selective Suspend.
+
+
+
+Release version
+
+2.08.30 (July 29, 2013)
+WHQL certified release.
+
+Release Fixes
+
+•	Fixed bug that prevented remote wakeup for composite devices.
+•	Fixed bug causing wrong number of bytes written to be reported after a timeout.
+•	Fixed bug in VCP XON/XOFF flow control.
+•	Fixed problem connecting multiple devices to EUSB adapter.
+
+
+
+Release version
+
+2.08.28 (February 13, 2013)
+WHQL certified release.
+
+Release Fixes
+
+•	Fixed bug on close port for .NET Framework applications.
+•	Fixed problem on close port that caused some hubs to fail.
+
+
+
+Release version
+
+2.08.26 (November 30, 2012)
+WHQL certified release.
+
+Release Fixes
+
+•	Support for Windows 8.
+•	Performance improvements on open and close port.
+•	Fixed problem where COM port became unavailable after D2XX port access.
+•	Fixed synchronisation issue that could lead to data loss.
+
+
+
+Release version
+
+2.08.24 (April 25, 2012)
+WHQL certified release.
+
+Release Fixes
+
+•	EEPROM fix for FT-X.
+•	Includes fixes from v2.08.14 onwards.
+
+
+Release version
+
+2.08.23 (February 7, 2012)
+Interim version with bug fix.
+
+Release Fixes
+
+•	Fix for spurious data problem with BM devices.
+
+
+2.08.21 (January 25, 2012)
+Interim version with bug fix.
+
+Release Fixes
+
+•	Fix for data loss problem when writing after open port.
+
+
+Release version
+
+2.08.19 (December 14, 2011)
+Interim version with bug fixes.
+
+Release Fixes
+
+•	New EEPROM functions (FT_EEPROM_Read, FT_EEPROM_Program) with simplified structures – 1 per device type.
+•	Fix for potential data integrity issue relating to read timeouts.
+•	Synchronise cancelling wait wake IRP to avoid potential BSOD on surprise removal, particularly via hubs.
+•	Fix for potential BSOD on surprise removal when using Ethernet USB hosts.
+•	Improvements to remote wakeup and power management functionality.
+•	Resolved issue which could cause opening port to be slow.
+•	Improved reliability when plugging/unplugging other USB devices.
+
+
+Release version
+
+2.08.17 (August 25, 2011)
+Interim version with bug fixes.
+
+Release Fixes
+
+•	Resolved VCP timeout issue.
+•	Corrected definitions of TXLED and RXLED for FT232H.
+•	Fixed issue with static D2XX library.
+•	Resolved issue with FT_ListDevices when a port is open in another process.
+•	Fix for potentially purging valid data after calling FT_Purge.
+•	Improved speed of FT_Close and FT_CreateDeviceInfoList.
+•	Fixed potential issue regarding repeated remote wakeup requests.
+•	Fix for VCP requesting high baud rates for FT232H devices.
+•	Fix for possible BSOD when application closed after surprise removal.
+ 
+
+Release version
+
+2.08.14 (March 16, 2011)
+WHQL certified release.
+
+Release Fixes
+
+•	Resolved potential lock-up or BSOD when buffers are full.
+
+
+Release version
+
+2.08.12 (February 28, 2011)
+Interim version with bug fixes.
+
+Release Fixes
+
+•	Added support for FT232H devices.
+•	Resolved memory leak when D2XX only.
+•	Fixed thread synchronisation issue which could cause application deadlock.
+•	Fix to enable automatic hardware flow control if flow control is set after manually toggling RTS or DTR.
+•	Resolved potential lock-up issue on surprise removal.
+•	Resolved VCP open port hang on resume issue.
+•	Resolved potential BSOD on surprise removal.
+•	Fixed increasing COM port assignment issue when upgrading driver.
+•	COM port now accessible without unplug/replug after changing COM port number in advanced property page.
+
+
+
+Release version
+
+2.08.08 (November 16, 2010)
+Interim version with bug fixes.
+
+Release Fixes
+
+•	Fix power hang on COM port write timeout.
+•	Fix D2XX write timeout always returning 0 bytes written.
+•	Added new function FT_GetQueueStatusEx – returns unclipped number of bytes available to read.
+•	Corrected use of extended sub-integer baud rate divisors for some devices.
+•	Resolved issue where reads could fail to timeout resulting in FT_IO_ERROR.
+•	Fixed issue when resuming an open D2XX port with data transferring. 
+•	Removed detection of error when application requests RTS_CONTROL_TOGGLE handshaking.
+
+
+
+Release version
+
+2.08.02 (August 11, 2010)
+WHQL version with various bug fixes and enhancements.
+
+Release Fixes
+
+•	Improved read performance, particularly for faster interface modes such as the FT2232H single channel synchronous FIFO mode.
+•	Updated co-installer now allows specifying the index that COM port allocation should begin at.
+•	Detect error when application requests RTS_CONTROL_TOGGLE handshaking since this is not supported in hardware.
+•	Corrected error when setting baud rates for hi-speed devices.
+•	Fixed bug which caused FT_GetCOMPortNumber to fail.
+•	Added more languages to FTLang:
+o	Portuguese
+•	Fixed issue where Rx character events could stop being signalled.
+•	Resolved issue where location IDs were not returned for hosts above index 10.  
+
+
+Release version
+
+2.06.02 (March 31, 2010)
+Interim version with bug fixes.
+
+Release Fixes
+
+•	Fix power management issues on Vista and Windows 7.
+•	Resolved issue with resuming an open COM port when returning from suspend.
+•	Resolved data loss issue when resizing buffers with hi-speed devices.
+
+
+Release version
+
+2.06.00 (October 22, 2009)
+WHQL certified version with various bug fixes and enhancements.
+
+Release Fixes
+
+•	Corrected buffer optimisation for hi-speed devices.
+•	Fix BSOD when terminating application with full buffers after disconnect.
+•	Prevent data being written to hi-speed chips until baud rate has stabilised.
+•	Fix XOn/XOff issue.
+•	Fix BSOD when connecting an FT232R/FT245R with endpoint size of 0.
+•	Fix possible BSOD when opening hi-speed device with full buffers.
+•	Added ability to alias hi-speed baud rates up to 12Mbaud.
+•	Added more languages to FTLang:
+o	Dutch
+•	Corrected positioning of controls on property page for some display settings.
+•	FTLang will now detect current user interface language rather than Windows system language.
+
+
+Release version
+
+2.04.16 (February 17, 2009)
+WHQL certified version with various bug fixes and enhancements.
+
+Release Fixes
+
+•	Fix power management issue.
+•	Additional protection in serial driver.
+
+Release version
+
+2.04.14 (October 27, 2008)
+WHQL candidate version with various bug fixes and enhancements.
+
+Release Fixes
+
+•	Added more languages to FTLang:
+o	Finnish
+•	Added support for FT2232H and FT4232H.
+•	Prevent users from programming EEPROMs with VID or PID of 0x0000.
+•	Fixed rare installation problem on Windows Server 2003 x64.
+•	Fixed problem with USB 2.0 hub enumeration.
+•	Fix for DTM rebalance test.
+•	Force endpoint size in FT232R/FT245R EEPROM structure to always be 64.
+•	Added FT_EVENT_LINE_STATUS for use with FT_SetEventNotification.
+•	Fixed LocIds bugs.
+
+Release version
+
+2.04.06 (March 13, 2008)
+WHQL certified version with various bug fixes and enhancements.
+
+Release Fixes
+
+•	Added multilingual support to property page via FTLang.DLL.  Supported languages are:
+o	English (Default)
+o	Chinese (Traditional)
+o	French
+o	German 
+o	Hungarian
+o	Italian
+o	Japanese
+o	Korean
+o	Polish
+o	Russian
+o	Spanish
+•	Added FT_GetComPortNumber function.
+•	Added Line Status to IOCTL_FT_GET_MODEM_STATUS.
+•	Changes to write request processing to fix blue screen. 
+•	Fixed FT_ResetDevice for FT2232.
+•	Fixes for Windows error report crashes.
+•	Fixed synchronisation issue.
+•	Fixed deadlock issues for multi-processor systems.
+•	Fixed error condition state in suspend.
+•	Revised co-installer.
+•	Support for COM port disabled in device manager (as opposed to disabled though property page).
+•	Fixed synchronization issue if COM port installation was incomplete.
+•	Fixed device info list issues: list not populated when using Win32 functions
+•	Now return default info for devices open in other processes.
+•	Fixed lock-up problem in Vista and XP.
+•	Fixed USB 2.0 location ID problem on Windows 2000.
+
+Release version
+
+2.02.04 (July 3, 2007)
+WHQL certified version.  New driver architecture combining 32-bit OS driver and 64-bit OS driver.
+
+Release Fixes
+
+•	Code fixes for PreFast and SDV.
+•	Fix write timeouts.
+•	Changed write request processing for DVDO box.
+•	Use LocIds for creating com ports if using IgnoreHWSerNum.
+•	Various fixes for PreFast.
+•	Remove references to 5-6 data bits and 1.5 stop bits.
+•	Fix blue screen in checked build serial driver.
+•	Power management fast resume for Vista.
+•	Fixed LocID problem with usb2.0 hubs on Win2K.
+•	Synchronize D2XX open and serial port startup.
+•	Fixed object name collision problem in VCP.
+•	Fixed WER 0xD1_W_ftdibus!FT_WriteTimeoutProc+2c.
+
+Release Version
+
+2.00.00r (May 18, 2006)
+WHQL certified version.  New driver architecture combining functionality of D2XX and VCP drivers.
+
+Release Fixes
+
+•	Removed unused fields from device extension.
+•	Fixed write timeout bytes returned problem.
+•	Changes for power management
+•	Fix for buffer full handshake problem.
+•	Combined driver model.
+
+•	Added workaround for R-chip bad serial number problem.
+•	Fixed bug in device startup.
+•	Fixed vendor request queuing lockup problem.
+•	Changed device ID creation to fix problem seen in 64-bit OS.
+•	Fixed lockup problem with hardware handshake (3-write problem) by restoring timeouts for OUT requests.
+•	Fixed disconnect after hibernate problem.
+•	Fixed disconnect during open session with active communications problem.
+
+
+
+Previous Release Revisions
+
+1.00.2176 (December 12, 2005)
+	WHQL certified version. Fixed installation problem.
+
+1.00.2172 (October 31, 2005) 
+	Support for FT2232C devices.
+
+1.00.2170 (October 27, 2005) 
+	Fixed write request synchronization issue.
+
+1.00.2169 (September 1, 2005) 
+	Fixed flow control issues.
+	Changed cancel processing to fix blue screen.
+
+1.00.2168 (June 8, 2005) 
+	Fixed lockup condition on port close.
+
+1.00.2166 (May 23, 2005) 
+	Fixed bug in software flow control.
+
+1.00.2163 (February 7, 2005) 
+	Support for buffered writes.
+	Fixed property page.
+
+1.00.2162 (November 25, 2004) 
+	Tested with HCT 12.0.
+
+1.00.2160 (October 26, 2004) 
+	Added option to prevent modem control signals following legacy port behaviour at startup.
+
+1.00.2159 (October 15, 2004) 
+	Fixed delay on disconnect under WinXP.
+
+1.00.2157 (September 28, 2004) 
+	Fixed bug that could cause computer to hang during closedown.
+
+1.00.2156 (September 9, 2004) 
+	Fixed bug in baud rate divisor calculation for AM devices.
+	Location Ids supported is no longer restricted to 10 or less.
+	Fixed bug that could cause computer to hang on surprise removal.
+	Fixed bug that caused device handle notification to fail.
+
+1.00.2154 (April 20, 2004) 
+	WHQL certified version. 
+Fixed initialization problem on WinXP SP1.
+	Fixed IOCTL_SERIAL_GET_DTRRTS.
+
+1.00.2151 (February 4, 2004) 
+	Fixed problem with signalling events on disconnect with open port.
+
+1.00.2150 (January 19, 2004) 
+	Fixed problem with signalling line status errors.
+	Fixed problem with Location IDs and external hubs.
+
+1.00.2148 (November 11, 2003) 
+	More fixes for WHQL.
+	Fixed problem that prevented RXCHAR event being signalled when buffers were full. 
+
+1.00.2146 (October 28, 2003) 
+	Various fixes for WHQL.
+	Added option for immediate processing of vendor commands.
+
+1.00.2145 (October 20, 2003) 
+	Fixed power-level problem with VCP serializer DLL interface.
+
+1.00.2143 (September 24, 2003) 
+	Fixed problem with RTS control toggle mode.
+	Fixed problem with device state after suspend/resume.
+
+1.00.2140 (September 11, 2003) 
+	Fixed problem with uninstall from DeviceManager.
+	Fixed problem with Sandstorm software.
+	Improved device request processing.
+	Fixed problem with modem control signal state on open.
+	Fixed cancel write request problem.
+	Added reset pipe retry count.
+	Added maximum devices option.
+	Added supported locations option.
+	
+1.00.2134 (June 16, 2003) 
+	More changes for BusHound.
+
+1.00.2133 (June 12, 2003) 
+	Fixed BusHound compatibility problem.
+	Updated properties page with serial enumerator option.
+
+1.00.2132 (June 09, 2003) 
+	Bug fixes for substitution mode.
+	Fixed problem where laptops could not enter standby mode.
+	Fixed problem with Lexmark printer.
+	Added "Set RTS on Close" flag.
+	Updated properties page.
+
+1.00.2126 (April 10, 2003) 
+	Support substitution mode.
+	Restore device state on return from suspend or hibernate.
+	Fixed device naming problem.
+	Fixed bug in purge when receive buffer full.
+	Fixed bug in properties page.
+
+1.00.2115 (February 25, 2003) 
+	Beta release includes drivers that have passed Microsoft certification tests.
+
+1.00.2115 (December 20, 2002) 
+	Beta release.
+Support force XON/XOFF option.
+New properties page.
+
+1.00.2114 (November 1, 2002) 
+	Beta release.
+Correctly identifies unserialized FT232BM and FT245BM devices.
+Fixed remote wakeup.
+
+1.00.2112 (October 25, 2002) 
+	Beta release.
+Support for FT232BM and FT245BM.
+Uses location information to enumerate non-serialized devices.
+
+
+1.00.2104 (July 22, 2002)     
+Drivers digitally signed.
+
+1.00.2101 (February 1, 2002)     
+Fixed problem that resulted in some devices not coming out of hibernate.
+Fixed divide-by-zero problem zero baud rate.
+
+1.00.2099 (January 7, 2002)     
+Fixed problem with aliased baud rates.
+
+1.00.2098 (December 20, 2001)     
+Improved transmit throughput.
+Support serial printers through Registry setting.
+Support for non-standard baud rates.
+Support Transmit Immediate.
+Disable modem control signals on port close.
+Fixed serial mouse disconnect problem in Standby mode.
+Runs under driver verifier.
+
+1.00.2088 (October 30, 2001)     
+Fixed connect/disconnect problem in Windows XP.
+Runs under driver verifier in Windows XP.
+
+1.00.2086 (October 5, 2001)     
+Fixed write request timeout processing.
+Fixed problem with restarting writes after port close.
+Fixed no space in read buffer problem.
+
+1.00.2084 (October 2, 2001)     
+Passes HCT tests (required for Windows XP Logo).
+Uses common uninstaller FTDIUNIN.EXE.
+Fixed minimum timeout problem.
+Fixed write request blue screen.
+Fixed write request timeout processing.
+Fixed data loss at low baud rates.
+
+1.00.2078 (July 27, 2001)     
+Fixed support for Logitech mice.
+Enhanced write request processing.
+
+1.00.2072 (May 2, 2001)     
+Runs under Windows XP.
+Fixed receive buffer full problem.
+
+1.00.2071 (Apr 26, 2001)     
+Enhanced BREAK condition processing.
+
+1.00.2069 (Mar 28, 2001)     
+Fixed hyper-terminal re-boot problem seen when transmitting files at low baud rates.
+
+1.00.2068 (Mar 23, 2001)     
+Drop modem status signals on disconnect
+
+
+
+
+1.00.2067 (Feb 26, 2001)
+	Fixed disconnect with open port problems
+	Support multiple devices attached at the same time
+	Fixed hyper-terminal re-boot problem seen when typing characters in terminal screen
+	Enabled for surprise removal (removes unexpected removal dialogue box)
+
+1.00.2060 (Jan 19, 2001)
+	Change to modem status register set up to improve port initialisation 
+
+1.00.2058 (Nov 7, 2000)
+	Fix to changing buffer size under Windows 2000 for FT8U232AM and FT8U245AM
+
+1.00.2057 (Oct 19, 2000)
+	Fix to enable speeds greater then 115k baud for FT8U232AM and FT8U245AM
+
+1.00.2055 (Sept 7, 2000)
+	Support for common INF for Win98 and Win2k drivers
+	Update of INF to support FT8U232AM and FT8U245AM
+
+1.00.2054 (Aug 10, 2000)
+	Increased time out delay to make enumerator performance more robust
+
+1.00.2053 (Aug 9, 2000)
+	Fixed transmit toggle problem
+
+1.00.2052 (July 24, 2000)
+	Driver stack made consistent to fix device power state failure
+	INF changes to add serial services
+
+1.00.2051 (June 15, 2000)
+	Fixed problem with 230k baud select, IN transfer restriction of 64 bytes removed
+	Fixed X-ON/X-OFF handshaking problem, added support for serial mouse
+
+1.00.2049 (Mar 25, 2000)
+	Install / uninstall for new naming (ftser2k)
+
+1.00.2046 (Mar 15, 2000)
+	New naming format: ftserial -> ftser2k
+
+1.00.2044 (Mar 8, 2000)
+	Update to fix problem with Direct Cable Connect
+
+1.00.2041 (Mar 3, 2000)
+	Fixed problem with baud rate selection
+
+1.00.2040 (Mar 1, 2000)
+	Removed FTDI uninstaller
+
+1.00.0	Beta (Feb 21, 2000)
+	Update to improve flow control
+
+Alpha100 (Feb 18, 2000) - first release
+Connects to ISP. Some flow control problems.
+
