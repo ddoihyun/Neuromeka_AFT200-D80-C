@@ -1,50 +1,70 @@
-"""
-uCAN slcan 수동 초기화 테스트
-"""
-import serial
+import can
 import time
 
+# COM 포트 번호를 본인 환경에 맞게 수정하세요
 COM_PORT = 'COM3'
+BITRATE = 1000000  # 1Mbps
+
+# 센서 CAN ID 설정 (기본값 0x01)
 SENSOR_ID = 0x01
+CMD_ID = 0x100 + SENSOR_ID  # → 0x101
 
-ser = serial.Serial(COM_PORT, 115200, timeout=1.0)
-time.sleep(0.5)
+def decode_force(high, low):
+    return (high * 256 + low) / 100.0 - 300.0
 
-# slcan 프로토콜: CAN 속도 설정 및 열기
-# S8 = 1Mbps, S6 = 500kbps, S5 = 250kbps
-ser.write(b'\r')          # 이전 명령 초기화
-time.sleep(0.1)
-ser.write(b'S8\r')        # CAN 속도 1Mbps 설정
-time.sleep(0.1)
-ser.write(b'O\r')         # CAN 버스 열기
-time.sleep(0.2)
+def decode_torque(high, low):
+    return (high * 256 + low) / 500.0 - 50.0
 
-print("Bus opened. Sending start command...")
+def main():
+    # slcan 인터페이스로 연결
+    bus = can.Bus(
+        interface='slcan',
+        channel=COM_PORT,
+        bitrate=BITRATE,
+        sleep_after_open=2.0
+    )
 
-# AFT200 연속 전송 명령: ID=0x102, DLC=3, data=01 03 01
-# slcan STD 프레임 포맷: t[ID 3자리][DLC][DATA...]\r
-cmd = b't10230103 01\r'   # ← 아래에서 포맷 설명 참고
-# 올바른 포맷:
-cmd = bytes('t{:03X}{:01X}{}\r'.format(
-    0x102, 3, '010301'
-), 'ascii')
-print(f"Sending: {cmd}")
-ser.write(cmd)
+    print("Connected. Sending start command...")
 
-time.sleep(0.2)
+    # AFT200 연속 전송 모드 시작 명령
+    # CAN Msg [ID=0x102, data: 0x01, 0x03, 0x01]
+    start_msg = can.Message(
+        arbitration_id=0x102,
+        data=[0x01, 0x03, 0x01],
+        is_extended_id=False
+    )
+    bus.send(start_msg)
+    time.sleep(0.1)
 
-# 응답 확인
-resp = ser.read(32)
-print(f"Response: {resp}")
+    Fx = Fy = Fz = Tx = Ty = Tz = 0.0
 
-print("\nListening for CAN frames (10 seconds)...")
-ser.timeout = 0.1
-start = time.time()
-while time.time() - start < 10:
-    line = ser.read_until(b'\r')
-    if line:
-        print(f"RAW: {line}")
+    print("Reading sensor data (Ctrl+C to stop)...")
+    try:
+        while True:
+            msg = bus.recv(timeout=1.0)
+            if msg is None:
+                print("Timeout: no message received")
+                continue
 
-ser.write(b'C\r')  # CAN 버스 닫기
-ser.close()
-print("Done.")
+            # 힘 데이터 (CAN ID = 센서ID + 0x000)
+            if msg.arbitration_id == SENSOR_ID:
+                Fx = decode_force(msg.data[0], msg.data[1])
+                Fy = decode_force(msg.data[2], msg.data[3])
+                Fz = decode_force(msg.data[4], msg.data[5])
+
+            # 토크 데이터 (CAN ID = 센서ID + 0x001 → 0x02)
+            elif msg.arbitration_id == SENSOR_ID + 1:
+                Tx = decode_torque(msg.data[0], msg.data[1])
+                Ty = decode_torque(msg.data[2], msg.data[3])
+                Tz = decode_torque(msg.data[4], msg.data[5])
+
+            print(f"Fx:{Fx:7.2f}N  Fy:{Fy:7.2f}N  Fz:{Fz:7.2f}N  "
+                  f"Tx:{Tx:6.3f}Nm Ty:{Ty:6.3f}Nm Tz:{Tz:6.3f}Nm")
+
+    except KeyboardInterrupt:
+        print("Stopping...")
+    finally:
+        bus.shutdown()
+
+if __name__ == "__main__":
+    main()
