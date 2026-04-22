@@ -1,149 +1,175 @@
-#***********************************************************************
+# ***********************************************************************
 #
 # Author: AIDIN ROBOTICS <info@aidinrobotics.com>
-# Date: 12-08-2023
+# Modified for uCAN (USB-CAN) by: claude.ai
 #
-# 이 코드는 AFT 6축 힘/토크 센서에서 데이터를 받아오는 예제
+# 이 코드는 AFT200-D80-C 6축 힘/토크 센서에서 CAN 통신으로 데이터를 받아오는 예제
 #
-#***********************************************************************/
+# 하드웨어 구성:
+#   PC --USB-- uCAN --CANH/CANL-- AFT200
+#                   별도 5V 전원 공급장치 --VCC/GND-- AFT200
+#
+# 의존성 설치:
+#   pip install python-can
+#
+# uCAN 장치 유형별 채널 설정 (아래 INTERFACE / CHANNEL 참고):
+#
+#   [slcan 펌웨어 계열 - CANable, uCAN SLCAN 등]
+#     Linux  : interface='slcan', channel='/dev/ttyACM0' (또는 /dev/ttyUSB0)
+#     Windows: interface='slcan', channel='COM3'
+#
+#   [candleLight 펌웨어 / SocketCAN - Linux 전용]
+#     interface='socketcan', channel='can0'
+#     (사전에 $ sudo ip link set can0 up type can bitrate 1000000 실행 필요)
+#
+#   [gs_usb 드라이버 - candleLight 기반, Windows/Linux]
+#     interface='gs_usb', channel=0
+#
+# AFT200-D80-C CAN 스펙:
+#   - 전원: 5V DC
+#   - CAN 속도: 1 Mbps (기본값)
+#   - 종단 저항: 버스 양 끝에 120Ω 필요
+#   - CAN ID (실제 로그에서 확인된 값):
+#       센서 → PC 힘 데이터:  0x001  (Fx, Fy, Fz) / DLC=8, 유효 데이터는 앞 6바이트
+#       센서 → PC 토크 데이터: 0x002  (Tx, Ty, Tz) / DLC=8, 유효 데이터는 앞 6바이트
+#       뒤 2바이트(data[6], data[7])는 항상 0x00 → 무시
+#
+# ***********************************************************************
 
-import struct   # 바이너리 데이터 변환용 (현재 코드에서는 거의 안 쓰임)
-import socket   # TCP 통신용 라이브러리
+import can  # pip install python-can
 
-# 센서의 IP 주소 (센서와 같은 네트워크에 있어야 함)
-IP_ADDR = '192.168.0.223'
+# ===== uCAN 인터페이스 설정 =====
+# 사용 중인 장치/OS에 맞게 아래 두 값을 수정하세요
+INTERFACE = 'slcan'    # 'slcan' | 'socketcan' | 'gs_usb'
+CHANNEL   = 'COM3'    # Windows: 'COM3', Linux: '/dev/ttyACM0', socketcan: 'can0'
+BITRATE   = 1_000_000  # AFT200 기본 CAN 속도: 1 Mbps
 
-# 센서가 사용하는 TCP 포트
-PORT = 4001
+# ===== AFT200 CAN ID 정의 (실제 로그에서 확인된 값) =====
+CAN_ID_FORCE  = 0x001  # 센서 → PC: 힘 데이터   (Fx, Fy, Fz)
+CAN_ID_TORQUE = 0x002  # 센서 → PC: 토크 데이터 (Tx, Ty, Tz)
 
-# ===== 센서 명령 관련 상수 =====
+# ===== 데이터 수신 반복 횟수 =====
+LOOP_COUNT = 10_000
 
-# 센서 ID (여러 센서를 구분할 때 사용 가능)
-CMD_TYPE_SENSOR_ID = '01'
 
-# 데이터 전송 모드 설정
-SENSOR_TRANSMIT_TYPE_MODE = '03'
+def build_start_command() -> can.Message:
+    """
+    센서에 '연속 데이터 전송 시작' 명령을 담은 CAN 메시지를 생성합니다.
 
-# 온도 보정 활성화 설정
-SENSOR_TRANSMIT_TYPE_SET_TEMP = '01'
+    로그 확인 결과, 이 센서는 전원 인가 후 명령 없이도 자동으로
+    0x001/0x002 ID로 데이터를 송출합니다.
+    명령 전송이 필요 없는 경우 main()에서 이 호출을 생략해도 됩니다.
 
-# TCP 소켓 생성 (IPv4, TCP 방식)
-s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    원본 TCP 패킷 구조 대응:
+        TCP sendData[0]  = 0x04  → CAN data[0] (헤더)
+        TCP sendData[3]  = 0x02  → CAN data[1] (명령 타입)
+        TCP sendData[4]  = 0x06  → CAN data[2] (데이터 길이)
+        TCP sendData[5]  = 0x01  → CAN data[3] (센서 ID)
+        TCP sendData[6]  = 0x03  → CAN data[4] (전송 모드)
+        TCP sendData[7]  = 0x01  → CAN data[5] (온도 보정 활성화)
+    """
+    data = [
+        0x04,  # 헤더
+        0x02,  # 명령 타입: 데이터 스트리밍 시작
+        0x06,  # 페이로드 길이
+        0x01,  # 센서 ID
+        0x03,  # 전송 모드 (연속 전송)
+        0x01,  # 온도 보정 활성화
+    ]
+    return can.Message(
+        arbitration_id=0x000,  # 명령용 CAN ID (센서 매뉴얼 확인 필요)
+        data=data,
+        is_extended_id=False   # 11bit 표준 ID 사용
+    )
+
+
+def parse_force(msg: can.Message) -> tuple:
+    """
+    힘 데이터 CAN 프레임을 파싱합니다. (원본 TCP recvData[4]==0x01 케이스)
+
+    CAN data[0:2] → Fx,  data[2:4] → Fy,  data[4:6] → Fz
+    변환식: value = (HIGH*256 + LOW) / 100.0 - 300.0   [단위: N]
+    """
+    d = msg.data
+    Fx = (d[0] * 256 + d[1]) / 100.0 - 300.0
+    Fy = (d[2] * 256 + d[3]) / 100.0 - 300.0
+    Fz = (d[4] * 256 + d[5]) / 100.0 - 300.0
+    return Fx, Fy, Fz
+
+
+def parse_torque(msg: can.Message) -> tuple:
+    """
+    토크 데이터 CAN 프레임을 파싱합니다. (원본 TCP recvData[4]==0x02 케이스)
+
+    CAN data[0:2] → Tx,  data[2:4] → Ty,  data[4:6] → Tz
+    변환식: value = (HIGH*256 + LOW) / 500.0 - 50.0   [단위: Nm]
+    """
+    d = msg.data
+    Tx = (d[0] * 256 + d[1]) / 500.0 - 50.0
+    Ty = (d[2] * 256 + d[3]) / 500.0 - 50.0
+    Tz = (d[4] * 256 + d[5]) / 500.0 - 50.0
+    return Tx, Ty, Tz
 
 
 def main():
-    global s
+    # ===== CAN 버스 초기화 =====
+    print(f"CAN 버스 초기화: interface={INTERFACE}, channel={CHANNEL}, bitrate={BITRATE}")
 
-    # 소켓 타임아웃 설정 (2초 안에 응답 없으면 에러)
-    s.settimeout(2.0)
+    with can.Bus(interface=INTERFACE, channel=CHANNEL, bitrate=BITRATE) as bus:
 
-    # 센서에 TCP 연결
-    s.connect((IP_ADDR, PORT))
+        # ===== 센서 초기 명령 전송 (데이터 스트리밍 시작) =====
+        cmd = build_start_command()
+        bus.send(cmd)
+        print("센서 시작 명령 전송 완료")
 
-    # ===== 센서 초기 명령 전송 =====
-    # 센서에게 "데이터 스트리밍 시작" 요청하는 패킷 구성
+        # ===== 변수 초기화 =====
+        Fx = Fy = Fz = 0.0  # 힘 (N)
+        Tx = Ty = Tz = 0.0  # 토크 (Nm)
 
-    # 패킷 구조 (hex string 이어붙임)
-    sendData = (
-        '04' +  # 헤더
-        '00' + '00' + '01' +  # 길이/명령 관련 필드
-        '02' +                # 명령 타입
-        '06' +                # 데이터 길이
-        CMD_TYPE_SENSOR_ID +  # 센서 ID
-        SENSOR_TRANSMIT_TYPE_MODE +  # 전송 모드
-        SENSOR_TRANSMIT_TYPE_SET_TEMP  # 온도 보정 활성화
-    )
+        received_count = 0
 
-    # hex 문자열 → 실제 바이트 배열로 변환
-    sendData = bytearray.fromhex(sendData)
+        # ===== 데이터 수신 루프 =====
+        # 원본: for i in range(10000): recvData = recvMsg()
+        while received_count < LOOP_COUNT:
 
-    # 센서로 명령 전송
-    s.send(sendData)
+            # CAN 메시지 수신 (timeout=2.0초 - 원본 소켓 타임아웃과 동일)
+            msg = bus.recv(timeout=2.0)
 
-    # 초기 응답 수신 (보통 ACK)
-    recvData = recvMsg()
+            if msg is None:
+                print("[경고] 수신 타임아웃 - 센서 연결 및 전원을 확인하세요")
+                continue
 
-    # ===== 변수 초기화 =====
-    # 힘 (Force)
-    Fx = 0
-    Fy = 0
-    Fz = 0
+            # ===== CAN ID로 메시지 유형 판별 =====
+            # 원본: recvData[4] == 0x01 → 힘 / 0x02 → 토크
+            # CAN에서는 arbitration_id로 구분
 
-    # 토크 (Torque)
-    Tx = 0
-    Ty = 0
-    Tz = 0
+            if msg.arbitration_id == CAN_ID_FORCE:
+                # 힘 데이터 프레임
+                Fx, Fy, Fz = parse_force(msg)
 
-    # ===== 데이터 수신 루프 =====
-    # 10000번 반복해서 데이터 읽기
-    for i in range(10000):
+            elif msg.arbitration_id == CAN_ID_TORQUE:
+                # 토크 데이터 프레임
+                Tx, Ty, Tz = parse_torque(msg)
 
-        # 센서에서 14바이트 데이터 수신
-        recvData = recvMsg()
+            else:
+                # 다른 CAN ID의 메시지는 무시 (버스에 다른 장치가 있을 경우)
+                continue
 
-        # recvData[4]는 데이터 타입 구분용
-        # 0x01 → 힘 데이터 (Fx, Fy, Fz)
-        # 0x02 → 토크 데이터 (Tx, Ty, Tz)
+            received_count += 1
 
-        if recvData[4] == 0x01:
-            # ===== 힘 데이터 처리 =====
+            # ===== 결과 출력 (원본과 동일한 형식) =====
+            print(
+                f"Fx : {round(Fx, 2)} "
+                f"Fy : {round(Fy, 2)} "
+                f"Fz : {round(Fz, 2)} "
+                f"Tx : {round(Tx, 2)} "
+                f"Ty : {round(Ty, 2)} "
+                f"Tz : {round(Tz, 2)} "
+            )
 
-            # 16비트 데이터 조합 (상위바이트 *256 + 하위바이트)
-            # → 실제 값으로 변환 (스케일 + offset 적용)
-            Fx = ((recvData[6]*256 + recvData[7]) / 100.0) - 300.0
-            Fy = ((recvData[8]*256 + recvData[9]) / 100.0) - 300.0
-            Fz = ((recvData[10]*256 + recvData[11]) / 100.0) - 300.0
-
-            # print("Fx : " + str(round(Fx,2)) + ...)
-
-        elif recvData[4] == 0x02:
-            # ===== 토크 데이터 처리 =====
-
-            Tx = ((recvData[6]*256 + recvData[7]) / 500.0) - 50.0
-            Ty = ((recvData[8]*256 + recvData[9]) / 500.0) - 50.0
-            Tz = ((recvData[10]*256 + recvData[11]) / 500.0) - 50.0
-
-            # print("Tx : " + str(round(Tx,2)) + ...)
-
-        # ===== 결과 출력 =====
-        # 힘 + 토크를 한 줄로 출력
-        print(
-            "Fx : " + str(round(Fx, 2)) + " " +
-            "Fy : " + str(round(Fy, 2)) + " " +
-            "Fz : " + str(round(Fz, 2)) + " " +
-            "Tx : " + str(round(Tx, 2)) + " " +
-            "Ty : " + str(round(Ty, 2)) + " " +
-            "Tz : " + str(round(Tz, 2)) + " "
-        )
-
-    # 소켓 연결 종료
-    s.close()
+    # with 블록 종료 시 bus.shutdown() 자동 호출 (소켓의 s.close()에 해당)
+    print("CAN 버스 연결 종료")
 
 
-def recvMsg():
-    # ===== 데이터 수신 함수 =====
-
-    # 센서에서 14바이트 읽기
-    recvData = bytearray(s.recv(14))
-
-    # 디버그용 출력
-    printMsg(recvData)
-
-    return recvData
-
-
-def printMsg(msg):
-    # ===== raw 데이터 출력 함수 =====
-
-    dataStr = "DATA: "
-
-    # 실제 센서 데이터 부분 (6~13 바이트)
-    for i in range(6, 14):
-        dataStr += str(msg[i]) + " "
-
-    # print(dataStr)  # 필요할 때만 활성화
-
-
-# 프로그램 시작점
 if __name__ == "__main__":
     main()
