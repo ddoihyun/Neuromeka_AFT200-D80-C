@@ -1,69 +1,98 @@
+"""
+AFT200-D80 + 시스템베이스 uCAN V3.0
+6축 힘/토크 센서 데이터 수신
+"""
+
 import can
 import time
+import csv
+from datetime import datetime
 
-# COM 포트 번호를 본인 환경에 맞게 수정하세요
-COM_PORT = 'COM3'
-BITRATE = 1000000  # 1Mbps
+# ── 설정 ──────────────────────────────────────
+COM_PORT    = 'COM3'
+CAN_BRATE   = 1000000    # 1Mbps
+SENSOR_ID   = 0x01       # 기본 CAN ID
+SAVE_CSV    = True       # CSV 저장 여부
+# ──────────────────────────────────────────────
 
-# 센서 CAN ID 설정 (기본값 0x01)
-SENSOR_ID = 0x01
-CMD_ID = 0x100 + SENSOR_ID  # → 0x101
+def decode_force(hi, lo):
+    return (hi * 256 + lo) / 100.0 - 300.0
 
-def decode_force(high, low):
-    return (high * 256 + low) / 100.0 - 300.0
-
-def decode_torque(high, low):
-    return (high * 256 + low) / 500.0 - 50.0
+def decode_torque(hi, lo):
+    return (hi * 256 + lo) / 500.0 - 50.0
 
 def main():
-    # slcan 인터페이스로 연결
     bus = can.Bus(
         interface='slcan',
         channel=COM_PORT,
-        bitrate=BITRATE,
-        sleep_after_open=2.0
+        bitrate=CAN_BRATE,
+        sleep_after_open=2.0,
+        rtscts=False
     )
+    print("✅ Connected to AFT200-D80\n")
 
-    print("Connected. Sending start command...")
-
-    # AFT200 연속 전송 모드 시작 명령
-    # CAN Msg [ID=0x102, data: 0x01, 0x03, 0x01]
-    start_msg = can.Message(
+    # 연속 전송 시작 명령
+    bus.send(can.Message(
         arbitration_id=0x102,
-        data=[0x01, 0x03, 0x01],
+        data=[SENSOR_ID, 0x03, 0x01],
         is_extended_id=False
-    )
-    bus.send(start_msg)
+    ))
     time.sleep(0.1)
 
     Fx = Fy = Fz = Tx = Ty = Tz = 0.0
 
-    print("Reading sensor data (Ctrl+C to stop)...")
+    # CSV 파일 준비
+    csvfile = None
+    writer  = None
+    if SAVE_CSV:
+        fname = datetime.now().strftime("aft200_%Y%m%d_%H%M%S.csv")
+        csvfile = open(fname, 'w', newline='')
+        writer  = csv.writer(csvfile)
+        writer.writerow(['timestamp', 'Fx', 'Fy', 'Fz', 'Tx', 'Ty', 'Tz'])
+        print(f"📄 Saving to {fname}\n")
+
+    print("Press Ctrl+C to stop\n")
+    print(f"{'Fx':>10} {'Fy':>10} {'Fz':>10}  |  "
+          f"{'Tx':>10} {'Ty':>10} {'Tz':>10}")
+    print("-" * 75)
+
     try:
         while True:
-            msg = bus.recv(timeout=1.0)
+            msg = bus.recv(timeout=2.0)
             if msg is None:
-                print("Timeout: no message received")
+                print("[WARN] Timeout")
                 continue
 
-            # 힘 데이터 (CAN ID = 센서ID + 0x000)
-            if msg.arbitration_id == SENSOR_ID:
-                Fx = decode_force(msg.data[0], msg.data[1])
-                Fy = decode_force(msg.data[2], msg.data[3])
-                Fz = decode_force(msg.data[4], msg.data[5])
+            d = msg.data
+            updated = False
 
-            # 토크 데이터 (CAN ID = 센서ID + 0x001 → 0x02)
-            elif msg.arbitration_id == SENSOR_ID + 1:
-                Tx = decode_torque(msg.data[0], msg.data[1])
-                Ty = decode_torque(msg.data[2], msg.data[3])
-                Tz = decode_torque(msg.data[4], msg.data[5])
+            if msg.arbitration_id == SENSOR_ID:          # 힘 프레임
+                Fx = decode_force(d[0], d[1])
+                Fy = decode_force(d[2], d[3])
+                Fz = decode_force(d[4], d[5])
+                updated = True
 
-            print(f"Fx:{Fx:7.2f}N  Fy:{Fy:7.2f}N  Fz:{Fz:7.2f}N  "
-                  f"Tx:{Tx:6.3f}Nm Ty:{Ty:6.3f}Nm Tz:{Tz:6.3f}Nm")
+            elif msg.arbitration_id == SENSOR_ID + 1:    # 토크 프레임
+                Tx = decode_torque(d[0], d[1])
+                Ty = decode_torque(d[2], d[3])
+                Tz = decode_torque(d[4], d[5])
+                updated = True
+
+            if updated:
+                ts = time.time()
+                print(f"{Fx:>10.3f}N {Fy:>10.3f}N {Fz:>10.3f}N  |  "
+                      f"{Tx:>9.4f}Nm {Ty:>9.4f}Nm {Tz:>9.4f}Nm")
+                if writer:
+                    writer.writerow([f"{ts:.4f}",
+                                     f"{Fx:.4f}", f"{Fy:.4f}", f"{Fz:.4f}",
+                                     f"{Tx:.4f}", f"{Ty:.4f}", f"{Tz:.4f}"])
 
     except KeyboardInterrupt:
-        print("Stopping...")
+        print("\n✅ Stopped.")
     finally:
+        if csvfile:
+            csvfile.close()
+            print(f"💾 Data saved.")
         bus.shutdown()
 
 if __name__ == "__main__":
