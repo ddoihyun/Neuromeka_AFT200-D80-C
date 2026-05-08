@@ -30,6 +30,7 @@ import sys
 from typing import List, Optional
 
 from neuromeka import IndyDCP3, TaskTeleopType
+from neuromeka.proto_step import control_msgs_pb2 as control_msgs
 
 # ===================================================================
 # [설정] 사용 환경에 맞게 수정
@@ -55,26 +56,43 @@ ROBOT_INDEX = 0
 BIAS_SAMPLE_COUNT  = 200
 BIAS_SAMPLE_DELAY  = 0.005
 
-# 힘 Threshold [N]
-FORCE_THRESHOLD_N  = 1.0
+# -----------------------------------------------------------------------
+# 힘 Threshold (데드밴드) [N]
+#
+# ★ Z축 드리프트 원인:
+#   중력/케이블 하중이 bias 후에도 ~3~4N 잔류 오프셋으로 남아
+#   아무도 안 건드려도 -Z 방향으로 조금씩 이동함.
+#   → FORCE_THRESHOLD_Z를 정지 시 COMP Fz 절댓값보다 크게 설정하면 해결.
+#   로그 기준: 정지 상태 COMP Fz ≈ -2~-4N  →  5.0N 으로 설정.
+#   너무 크면 Z 조작이 둔해지므로 실제 잔류값+1N 정도가 적당.
+# -----------------------------------------------------------------------
+FORCE_THRESHOLD_XY = 1.0   # X, Y 방향 데드밴드 [N]
+FORCE_THRESHOLD_Z  = 5.0   # Z 방향 데드밴드 [N]  ← 중력 잔류 오프셋 흡수
 
 # -----------------------------------------------------------------------
 # 순응 제어 댐핑 계수 B [N·s/mm]  →  증분 이동량 = F / B * dt
 #   값이 작을수록 같은 힘에 더 빠르게(민감하게) 반응
 #   예: B=5  → 5N 인가 시 약 2mm/루프(100mm/s @50Hz)
 # -----------------------------------------------------------------------
-ADMITTANCE_B_XY = 5.0    # X, Y 방향 댐핑 [N·s/mm]
-ADMITTANCE_B_Z  = 5.0    # Z 방향 댐핑 [N·s/mm]
+ADMITTANCE_B_XY = 3.0    # X, Y 방향 댐핑 [N·s/mm]
+ADMITTANCE_B_Z  = 3.0    # Z 방향 댐핑 [N·s/mm]
 
 # 한 루프 최대 증분 이동량 클리핑 [mm] (안전)
-MAX_STEP_MM = 5.0
+MAX_STEP_MM = 10.0
 
 # 텔레오퍼레이션 속도/가속도 비율
-TEL_VEL_RATIO = 1.0
+TEL_VEL_RATIO = 0.25
 TEL_ACC_RATIO = 1.0
 
 # 제어 루프 주기 [초]
 CONTROL_PERIOD = 0.02   # 50 Hz
+
+# -----------------------------------------------------------------------
+# dt 스파이크 상한 [초]
+# 네트워크 지연/GC 등으로 dt가 100ms+ 로 튀면 step이 폭발.
+# 실제 dt가 이 값을 넘으면 CONTROL_PERIOD 로 고정하여 안전하게 처리.
+# -----------------------------------------------------------------------
+MAX_DT = CONTROL_PERIOD * 2   # 40ms
 
 # ===================================================================
 # 축 이름 (로그 표시용)
@@ -219,9 +237,9 @@ def compute_step(ft_compensated, dt):
             return 0.0
         return (val - threshold) if val > 0 else (val + threshold)
 
-    Fx_eff = deadband(Fx, FORCE_THRESHOLD_N)
-    Fy_eff = deadband(Fy, FORCE_THRESHOLD_N)
-    Fz_eff = deadband(Fz, FORCE_THRESHOLD_N)
+    Fx_eff = deadband(Fx, FORCE_THRESHOLD_XY)
+    Fy_eff = deadband(Fy, FORCE_THRESHOLD_XY)
+    Fz_eff = deadband(Fz, FORCE_THRESHOLD_Z)
 
     # 댐퍼 모델: step = (F / B) * dt  [mm]
     sx = (Fx_eff / ADMITTANCE_B_XY) * dt
@@ -300,8 +318,8 @@ def main():
     log.info('=' * 60)
     log.info('힘 추종 직접 교시 시스템 시작')
     log.info('제어 방식: 순응 제어 (Compliant / Direct Teaching)')
-    log.info('F_threshold=%.1fN, B_xy=%.1fN·s/mm, B_z=%.1fN·s/mm, max_step=%.1fmm',
-             FORCE_THRESHOLD_N, ADMITTANCE_B_XY, ADMITTANCE_B_Z, MAX_STEP_MM)
+    log.info('F_threshold_xy=%.1fN, F_threshold_z=%.1fN, B_xy=%.1fN·s/mm, B_z=%.1fN·s/mm, max_step=%.1fmm',
+             FORCE_THRESHOLD_XY, FORCE_THRESHOLD_Z, ADMITTANCE_B_XY, ADMITTANCE_B_Z, MAX_STEP_MM)
     log.info('힘 풀면 즉시 정지 (원위치 복귀 없음) - 직접교시 모드와 동일')
     log.info('=' * 60)
 
@@ -348,7 +366,7 @@ def main():
     # ------------------------------------------------------------------
     log.info('텔레오퍼레이션 모드 시작 (TaskTeleopType.RELATIVE - tool 좌표계 기준)')
     try:
-        indy.start_teleop(method=TaskTeleopType.RELATIVE)
+        indy.start_teleop(2)
         time.sleep(0.5)
     except Exception as e:
         log.error('텔레오퍼레이션 시작 실패: %s', e)
@@ -391,8 +409,15 @@ def main():
     try:
         while True:
             t_start  = time.time()
-            dt       = t_start - prev_time   # 실제 경과 시간 사용 (정확도↑)
+            dt       = t_start - prev_time
             prev_time = t_start
+
+            # dt 스파이크 방지: 네트워크 지연 등으로 dt가 튀면 step 폭발 가능
+            # → MAX_DT(40ms) 초과 시 CONTROL_PERIOD 로 고정
+            if dt > MAX_DT:
+                log.debug('[Loop %d] dt 스파이크 감지 (%.1fms) → %.0fms로 고정',
+                          loop_count, dt * 1000, CONTROL_PERIOD * 1000)
+                dt = CONTROL_PERIOD
 
             # 5-1. F/T 읽기 + 0점 보정
             ft_raw  = sensor.get_ft()
@@ -408,17 +433,20 @@ def main():
             # 5-4. 상태 로그 (10루프마다, 실제 이동 축 표시)
             log_status(ft_raw, ft_comp, step, cum_disp[:3], loop_count)
 
-            # 5-5. 로봇 이동 명령
-            #   RELATIVE 모드: start_teleop 위치 기준 cum_disp 로 이동
-            #   → 매 루프 갱신하므로 실시간 추종
+            # 5-5. 로봇 이동 명령 (TCP 좌표계 기준)
+            #   TELE_TASK_TCP: tool 좌표계 기준 증분 이동
+            #   → 로봇 자세가 바뀌어도 항상 tool 방향으로 이동
             try:
-                indy.movetelel_rel(
-                    tpos=cum_disp,
-                    vel_ratio=TEL_VEL_RATIO,
-                    acc_ratio=TEL_ACC_RATIO,
+                indy.control.MoveTeleL(
+                    control_msgs.MoveTeleLReq(
+                        tpos=cum_disp,
+                        vel_ratio=TEL_VEL_RATIO,
+                        acc_ratio=TEL_ACC_RATIO,
+                        method=control_msgs.TELE_TASK_TCP,
+                    )
                 )
             except Exception as e:
-                log.error('movetelel_rel 오류: %s', e)
+                log.error('MoveTeleL(TCP) 오류: %s', e)
                 if not check_robot_connection(indy):
                     log.error('로봇 연결 이상 - 제어 루프 중단')
                     break
