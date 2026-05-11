@@ -57,6 +57,14 @@ ROBOT_INDEX = 0
 # True: enter teleop mode and send MoveTeleL commands to the robot.
 APPLY_ROBOT_COMMANDS = True
 
+# Axis isolation for safer staged tests.
+# Options:
+#   'X'   -> use Fx and Tx only
+#   'Y'   -> use Fy and Ty only
+#   'Z'   -> use Fz and Tz only
+#   'ALL' -> use all force/torque axes
+AXIS_TEST_MODE = 'ALL'
+
 
 # ===================================================================
 # Control parameters
@@ -104,6 +112,12 @@ MAX_DT = CONTROL_PERIOD * 2
 
 AXIS_NAMES = ['X(tool)', 'Y(tool)', 'Z(tool)', 'Rx(tool)', 'Ry(tool)', 'Rz(tool)']
 AXIS_UNITS = ['mm', 'mm', 'mm', 'deg', 'deg', 'deg']
+AXIS_MODE_TO_INDICES = {
+    'X': (0, 3),
+    'Y': (1, 4),
+    'Z': (2, 5),
+    'ALL': (0, 1, 2, 3, 4, 5),
+}
 
 
 # ===================================================================
@@ -216,6 +230,13 @@ def deadband(val, threshold):
     return (val - threshold) if val > 0 else (val + threshold)
 
 
+def get_enabled_axis_indices():
+    mode = AXIS_TEST_MODE.upper()
+    if mode not in AXIS_MODE_TO_INDICES:
+        raise ValueError("AXIS_TEST_MODE must be one of 'X', 'Y', 'Z', 'ALL'")
+    return AXIS_MODE_TO_INDICES[mode]
+
+
 def measure_bias(sensor, n_samples=BIAS_SAMPLE_COUNT, delay=BIAS_SAMPLE_DELAY):
     log.info('Bias measurement: collecting %d samples. Keep robot and sensor still.', n_samples)
     accum = [0.0] * 6
@@ -231,7 +252,7 @@ def measure_bias(sensor, n_samples=BIAS_SAMPLE_COUNT, delay=BIAS_SAMPLE_DELAY):
     return bias
 
 
-def compensate_and_deadband(ft_raw, bias):
+def compensate_and_deadband(ft_raw, bias, enabled_indices):
     ft_comp = [ft_raw[i] - bias[i] for i in range(6)]
     wrench_eff = [
         deadband(ft_comp[0], FORCE_THRESHOLD_XY),
@@ -241,10 +262,14 @@ def compensate_and_deadband(ft_raw, bias):
         deadband(ft_comp[4], TORQUE_THRESHOLD_RXRY),
         deadband(ft_comp[5], TORQUE_THRESHOLD_RZ),
     ]
+    enabled = set(enabled_indices)
+    for i in range(6):
+        if i not in enabled:
+            wrench_eff[i] = 0.0
     return ft_comp, wrench_eff
 
 
-def update_virtual_target(virtual_pose, wrench_eff, dt):
+def update_virtual_target(virtual_pose, wrench_eff, dt, enabled_indices):
     # type: (List[float], List[float], float) -> List[float]
     virtual_step = [
         wrench_eff[0] * VIRTUAL_POINT_FORCE_GAIN_XY * dt,
@@ -260,13 +285,17 @@ def update_virtual_target(virtual_pose, wrench_eff, dt):
     for i in range(3, 6):
         virtual_step[i] = clip(virtual_step[i], MAX_VIRTUAL_STEP_DEG)
 
+    enabled = set(enabled_indices)
     for i in range(6):
-        virtual_pose[i] += virtual_step[i]
+        if i in enabled:
+            virtual_pose[i] += virtual_step[i]
+        else:
+            virtual_step[i] = 0.0
 
     return virtual_step
 
 
-def compute_spring_damper_step(virtual_pose, command_pose, dt):
+def compute_spring_damper_step(virtual_pose, command_pose, dt, enabled_indices):
     # type: (List[float], List[float], float) -> Tuple[List[float], List[float]]
     error = [virtual_pose[i] - command_pose[i] for i in range(6)]
 
@@ -284,6 +313,12 @@ def compute_spring_damper_step(virtual_pose, command_pose, dt):
         command_step[i] = clip(command_step[i], MAX_COMMAND_STEP_MM)
     for i in range(3, 6):
         command_step[i] = clip(command_step[i], MAX_COMMAND_STEP_DEG)
+
+    enabled = set(enabled_indices)
+    for i in range(6):
+        if i not in enabled:
+            error[i] = 0.0
+            command_step[i] = 0.0
 
     return command_step, error
 
@@ -367,9 +402,18 @@ def log_status(ft_raw, ft_comp, wrench_eff, virtual_step, command_step,
 # ===================================================================
 
 def main():
+    try:
+        enabled_indices = get_enabled_axis_indices()
+    except ValueError as e:
+        log.error('%s', e)
+        return
+
+    enabled_axis_names = ', '.join(AXIS_NAMES[i] for i in enabled_indices)
+
     log.info('=' * 70)
     log.info('6-axis virtual-point admittance controller started')
     log.info('Robot command mode: %s', 'APPLY' if APPLY_ROBOT_COMMANDS else 'DEBUG_ONLY')
+    log.info('Axis test mode: %s (%s)', AXIS_TEST_MODE.upper(), enabled_axis_names)
     log.info('Model: virtual target from F/T, follow with D*x_dot = K*(x_virtual - x_command)')
     log.info('Input gain F xy/z=%.2f/%.2f mm/(N*s), T rxry/rz=%.2f/%.2f deg/(Nm*s)',
              VIRTUAL_POINT_FORCE_GAIN_XY, VIRTUAL_POINT_FORCE_GAIN_Z,
@@ -453,10 +497,12 @@ def main():
                 dt = CONTROL_PERIOD
 
             ft_raw = sensor.get_ft()
-            ft_comp, wrench_eff = compensate_and_deadband(ft_raw, bias)
+            ft_comp, wrench_eff = compensate_and_deadband(ft_raw, bias, enabled_indices)
 
-            virtual_step = update_virtual_target(virtual_pose, wrench_eff, dt)
-            command_step, error = compute_spring_damper_step(virtual_pose, command_pose, dt)
+            virtual_step = update_virtual_target(virtual_pose, wrench_eff, dt, enabled_indices)
+            command_step, error = compute_spring_damper_step(
+                virtual_pose, command_pose, dt, enabled_indices
+            )
 
             for i in range(6):
                 command_pose[i] += command_step[i]
