@@ -11,7 +11,7 @@
 #   → 속도 명령(v = F / B) → 매 루프 증분 이동(누적 방식)
 #   → movetelel_rel() 로봇 이동
 #
-#   ★ 핵심: 힘 → 이번 루프에서의 증분 이동량 (velocity 개념)
+# 핵심: 힘 → 이번 루프에서의 증분 이동량 (velocity 개념)
 #            외력이 풀리면 즉시 정지 (원위치 복귀 없음)
 #            → 직접교시(Free-Drive)와 동일한 느낌
 #
@@ -62,23 +62,38 @@ BIAS_SAMPLE_DELAY  = 0.005
 # ★ Z축 드리프트 원인:
 #   중력/케이블 하중이 bias 후에도 ~3~4N 잔류 오프셋으로 남아
 #   아무도 안 건드려도 -Z 방향으로 조금씩 이동함.
-#   → FORCE_THRESHOLD_Z를 정지 시 COMP Fz 절댓값보다 크게 설정하면 해결.
-#   로그 기준: 정지 상태 COMP Fz ≈ -2~-4N  →  5.0N 으로 설정.
-#   너무 크면 Z 조작이 둔해지므로 실제 잔류값+1N 정도가 적당.
 # -----------------------------------------------------------------------
-FORCE_THRESHOLD_XY = 1.0   # X, Y 방향 데드밴드 [N]
-FORCE_THRESHOLD_Z  = 5.0   # Z 방향 데드밴드 [N]  ← 중력 잔류 오프셋 흡수
+FORCE_THRESHOLD_XY = 0.5   # X, Y 방향 데드밴드 [N]
+FORCE_THRESHOLD_Z  = 1.0   # Z 방향 데드밴드 [N]  ← 중력 잔류 오프셋 흡수
+
+# -----------------------------------------------------------------------
+# 토크 Threshold (데드밴드) [N·m]
+# -----------------------------------------------------------------------
+TORQUE_THRESHOLD_XY = 0.05  # Tx, Ty 방향 데드밴드 [N·m]
+TORQUE_THRESHOLD_Z  = 0.05  # Tz 방향 데드밴드 [N·m]
 
 # -----------------------------------------------------------------------
 # 순응 제어 댐핑 계수 B [N·s/mm]  →  증분 이동량 = F / B * dt
 #   값이 작을수록 같은 힘에 더 빠르게(민감하게) 반응
 #   예: B=5  → 5N 인가 시 약 2mm/루프(100mm/s @50Hz)
 # -----------------------------------------------------------------------
-ADMITTANCE_B_XY = 3.0    # X, Y 방향 댐핑 [N·s/mm]
-ADMITTANCE_B_Z  = 3.0    # Z 방향 댐핑 [N·s/mm]
+ADMITTANCE_B_XY = 0.25    # X, Y 방향 댐핑 [N·s/mm] ← 낮출수록 부드러움 (1.0~2.0 권장)
+ADMITTANCE_B_Z  = 0.25    # Z 방향 댐핑 [N·s/mm]
+
+# -----------------------------------------------------------------------
+# 순응 제어 댐핑 계수 B_rot [N·m·s/deg]  →  증분 회전량 = T / B_rot * dt
+#   값이 작을수록 같은 토크에 더 빠르게(민감하게) 반응
+#   예: B_rot=0.01 → 0.1N·m 인가 시 약 0.2deg/루프(10deg/s @50Hz)
+#   ★ 처음엔 크게 잡고(0.05~0.1) 조금씩 줄이며 튜닝할 것 (급회전 위험)
+# -----------------------------------------------------------------------
+ADMITTANCE_B_ROT_XY = 0.05  # Rx, Ry 방향 댐핑 [N·m·s/deg]
+ADMITTANCE_B_ROT_Z  = 0.05  # Rz 방향 댐핑 [N·m·s/deg]
 
 # 한 루프 최대 증분 이동량 클리핑 [mm] (안전)
-MAX_STEP_MM = 10.0
+MAX_STEP_MM  = 5.0
+
+# 한 루프 최대 증분 회전량 클리핑 [deg] (안전)
+MAX_STEP_DEG = 3.0
 
 # 텔레오퍼레이션 속도/가속도 비율
 TEL_VEL_RATIO = 0.25
@@ -97,7 +112,8 @@ MAX_DT = CONTROL_PERIOD * 2   # 40ms
 # ===================================================================
 # 축 이름 (로그 표시용)
 # ===================================================================
-AXIS_NAMES = ['X(tool)', 'Y(tool)', 'Z(tool)']
+AXIS_NAMES     = ['X(tool)', 'Y(tool)', 'Z(tool)']
+ROT_AXIS_NAMES = ['Rx(tool)', 'Ry(tool)', 'Rz(tool)']
 
 # ===================================================================
 # 로깅 설정
@@ -214,7 +230,6 @@ def measure_bias(sensor, n_samples=BIAS_SAMPLE_COUNT, delay=BIAS_SAMPLE_DELAY):
 # ===================================================================
 # 순응 제어 모델: 외력 → 이번 루프 증분 이동량 (velocity * dt)
 #
-# ★ 변경 핵심:
 #   기존 어드미턴스:  disp = F / K  (스프링 모델 → 힘 풀면 원위치)
 #   순응 제어:        step = F / B * dt  (댐퍼 모델 → 힘 풀면 정지)
 #
@@ -231,12 +246,14 @@ def compute_step(ft_compensated, dt):
     반환값: [step_x, step_y, step_z, 0, 0, 0]  (tool 좌표계 기준)
     """
     Fx, Fy, Fz = ft_compensated[0], ft_compensated[1], ft_compensated[2]
+    Tx, Ty, Tz = ft_compensated[3], ft_compensated[4], ft_compensated[5]
 
     def deadband(val, threshold):
         if abs(val) < threshold:
             return 0.0
         return (val - threshold) if val > 0 else (val + threshold)
 
+    # 힘 → 선형 이동 증분 [mm]
     Fx_eff = deadband(Fx, FORCE_THRESHOLD_XY)
     Fy_eff = deadband(Fy, FORCE_THRESHOLD_XY)
     Fz_eff = deadband(Fz, FORCE_THRESHOLD_Z)
@@ -246,14 +263,27 @@ def compute_step(ft_compensated, dt):
     sy = (Fy_eff / ADMITTANCE_B_XY) * dt
     sz = (Fz_eff / ADMITTANCE_B_Z)  * dt
 
+    # 토크 → 회전 증분 [deg]
+    Tx_eff = deadband(Tx, TORQUE_THRESHOLD_XY)
+    Ty_eff = deadband(Ty, TORQUE_THRESHOLD_XY)
+    Tz_eff = deadband(Tz, TORQUE_THRESHOLD_Z)
+
+    # 댐퍼 모델: step_rot = (T / B_rot) * dt  [deg]
+    srx = (Tx_eff / ADMITTANCE_B_ROT_XY) * dt
+    sry = (Ty_eff / ADMITTANCE_B_ROT_XY) * dt
+    srz = (Tz_eff / ADMITTANCE_B_ROT_Z)  * dt
+
     def clip(val, limit):
         return max(-limit, min(limit, val))
 
-    sx = clip(sx, MAX_STEP_MM)
-    sy = clip(sy, MAX_STEP_MM)
-    sz = clip(sz, MAX_STEP_MM)
+    sx  = clip(sx,  MAX_STEP_MM)
+    sy  = clip(sy,  MAX_STEP_MM)
+    sz  = clip(sz,  MAX_STEP_MM)
+    srx = clip(srx, MAX_STEP_DEG)
+    sry = clip(sry, MAX_STEP_DEG)
+    srz = clip(srz, MAX_STEP_DEG)
 
-    return [sx, sy, sz, 0.0, 0.0, 0.0]
+    return [sx, sy, sz, srx, sry, srz]
 
 
 # ===================================================================
@@ -293,19 +323,27 @@ def log_status(ft_raw, ft_comp, step, cum_disp, loop_count):
         if abs(step[i]) > 1e-4:
             direction = '+' if step[i] > 0 else '-'
             moving_axes.append('{}{} {:.2f}mm'.format(direction, name, abs(step[i])))
+    for i, name in enumerate(ROT_AXIS_NAMES):
+        if abs(step[3 + i]) > 1e-4:
+            direction = '+' if step[3 + i] > 0 else '-'
+            moving_axes.append('{}{} {:.2f}deg'.format(direction, name, abs(step[3 + i])))
     move_str = ', '.join(moving_axes) if moving_axes else '정지'
 
     log.debug(
-        '[Loop %4d] RAW F=[%+6.2f, %+6.2f, %+6.2f]N  '
-        'COMP F=[%+6.2f, %+6.2f, %+6.2f]N  '
-        '이번 증분=[%+6.3f, %+6.3f, %+6.3f]mm  '
-        '누적 변위=[%+7.2f, %+7.2f, %+7.2f]mm  '
+        '[Loop %4d] RAW F=[%+6.2f, %+6.2f, %+6.2f]N  T=[%+6.3f, %+6.3f, %+6.3f]Nm  '
+        'COMP F=[%+6.2f, %+6.2f, %+6.2f]N  T=[%+6.3f, %+6.3f, %+6.3f]Nm  '
+        '증분 XYZ=[%+6.3f, %+6.3f, %+6.3f]mm  RxRyRz=[%+6.3f, %+6.3f, %+6.3f]deg  '
+        '누적 XYZ=[%+7.2f, %+7.2f, %+7.2f]mm  RxRyRz=[%+7.2f, %+7.2f, %+7.2f]deg  '
         '이동 축: %s',
         loop_count,
         ft_raw[0],  ft_raw[1],  ft_raw[2],
+        ft_raw[3],  ft_raw[4],  ft_raw[5],
         ft_comp[0], ft_comp[1], ft_comp[2],
+        ft_comp[3], ft_comp[4], ft_comp[5],
         step[0],    step[1],    step[2],
+        step[3],    step[4],    step[5],
         cum_disp[0], cum_disp[1], cum_disp[2],
+        cum_disp[3], cum_disp[4], cum_disp[5],
         move_str,
     )
 
@@ -317,9 +355,11 @@ def log_status(ft_raw, ft_comp, step, cum_disp, loop_count):
 def main():
     log.info('=' * 60)
     log.info('힘 추종 직접 교시 시스템 시작')
-    log.info('제어 방식: 순응 제어 (Compliant / Direct Teaching)')
-    log.info('F_threshold_xy=%.1fN, F_threshold_z=%.1fN, B_xy=%.1fN·s/mm, B_z=%.1fN·s/mm, max_step=%.1fmm',
+    log.info('제어 방식: 순응 제어 (Compliant / Direct Teaching) - 힘 + 토크')
+    log.info('F_threshold_xy=%.1fN, F_threshold_z=%.1fN, B_xy=%.2fN·s/mm, B_z=%.2fN·s/mm, max_step=%.1fmm',
              FORCE_THRESHOLD_XY, FORCE_THRESHOLD_Z, ADMITTANCE_B_XY, ADMITTANCE_B_Z, MAX_STEP_MM)
+    log.info('T_threshold_xy=%.3fNm, T_threshold_z=%.3fNm, B_rot_xy=%.3fNm·s/deg, B_rot_z=%.3fNm·s/deg, max_step=%.1fdeg',
+             TORQUE_THRESHOLD_XY, TORQUE_THRESHOLD_Z, ADMITTANCE_B_ROT_XY, ADMITTANCE_B_ROT_Z, MAX_STEP_DEG)
     log.info('힘 풀면 즉시 정지 (원위치 복귀 없음) - 직접교시 모드와 동일')
     log.info('=' * 60)
 
@@ -389,10 +429,10 @@ def main():
     # ------------------------------------------------------------------
     # 5. 순응 제어 루프
     #
-    # ★ RELATIVE 모드 동작 방식:
+    # RELATIVE 모드 동작 방식:
     #   movetelel_rel(tpos) → start_teleop 시점의 위치 + tpos 로 이동
     #
-    # ★ 직접교시처럼 동작시키는 방법:
+    # 직접교시처럼 동작시키는 방법:
     #   매 루프마다 (F/B)*dt 만큼의 증분(step)을 계산하고
     #   cumulative_disp(누적 변위)에 더하여 전달
     #   → 힘이 없으면 step=0 → 누적 변위 유지 → 현재 위치에서 정지
@@ -431,7 +471,7 @@ def main():
                 cum_disp[i] += step[i]
 
             # 5-4. 상태 로그 (10루프마다, 실제 이동 축 표시)
-            log_status(ft_raw, ft_comp, step, cum_disp[:3], loop_count)
+            log_status(ft_raw, ft_comp, step, cum_disp, loop_count)
 
             # 5-5. 로봇 이동 명령 (TCP 좌표계 기준)
             #   TELE_TASK_TCP: tool 좌표계 기준 증분 이동
@@ -479,8 +519,9 @@ def main():
 
         sensor.stop()
         log.info('시스템 종료 완료. 총 제어 루프 수: %d', loop_count)
-        log.info('최종 누적 변위: X(tool)=%.2fmm, Y(tool)=%.2fmm, Z(tool)=%.2fmm',
-                 cum_disp[0], cum_disp[1], cum_disp[2])
+        log.info('최종 누적 변위: X(tool)=%.2fmm, Y(tool)=%.2fmm, Z(tool)=%.2fmm  /  Rx=%.2fdeg, Ry=%.2fdeg, Rz=%.2fdeg',
+                 cum_disp[0], cum_disp[1], cum_disp[2],
+                 cum_disp[3], cum_disp[4], cum_disp[5])
 
 
 # ===================================================================
