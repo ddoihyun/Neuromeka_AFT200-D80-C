@@ -1,151 +1,143 @@
 # ***********************************************************************
 #
-# 힘 추종(Force Following) 제어 - 어드미턴스 제어 기반 직접 교시
+# 6-axis F/T virtual-point admittance controller for Indy teleoperation.
 #
-# 시스템 구성:
-#   PC --USB-- uCAN --CANH/CANL-- AFT200-D80-C (6축 F/T 센서)
-#   PC --Ethernet-- Indy 로봇 (192.168.0.137)
+# Control idea:
+#   1. Bias-compensated force/torque moves a virtual target pose.
+#   2. The robot command pose follows that virtual target through a
+#      spring-damper relation without a mass term:
 #
-# 제어 원리 (순응 제어 - 직접 교시 방식):
-#   외부 힘(F_ext) → 0점 보정 → Threshold 필터링
-#   → 속도 명령(v = F / B) → 매 루프 증분 이동(누적 방식)
-#   → movetelel_rel() 로봇 이동
+#          D * x_dot = K * (x_virtual - x_command)
 #
-# 핵심: 힘 → 이번 루프에서의 증분 이동량 (velocity 개념)
-#            외력이 풀리면 즉시 정지 (원위치 복귀 없음)
-#            → 직접교시(Free-Drive)와 동일한 느낌
+#   3. MoveTeleL receives the accumulated 6D relative task pose:
+#      [x, y, z, Rx, Ry, Rz].
 #
-# 의존성:
-#   pip install python-can neuromeka
+# Notes:
+#   - Translation units are mm.
+#   - Rotation units are assumed to be deg for Indy task poses.
+#   - The real TCP pose is approximated by the last commanded relative pose.
+#     If robot feedback pose is needed later, replace command_pose with the
+#     measured TCP-relative pose in the spring-damper error calculation.
 #
 # ***********************************************************************
 
 from __future__ import annotations
 
-import can
-import time
-import threading
 import logging
 import sys
-from typing import List, Optional
+import threading
+import time
+from typing import List, Tuple
 
-from neuromeka import IndyDCP3, TaskTeleopType
-from neuromeka.proto_step import control_msgs_pb2 as control_msgs
+import can
+from neuromeka import IndyDCP3
+
+try:
+    from neuromeka.proto_step import control_msgs_pb2 as control_msgs
+except ModuleNotFoundError:
+    from neuromeka.proto import control_msgs_pb2 as control_msgs
+
 
 # ===================================================================
-# [설정] 사용 환경에 맞게 수정
+# Hardware settings
 # ===================================================================
 
-# --- CAN (F/T 센서) 설정 ---
 CAN_INTERFACE = 'slcan'
-CAN_CHANNEL   = 'COM3'
-CAN_BITRATE   = 1_000_000
+CAN_CHANNEL = 'COM3'
+CAN_BITRATE = 1_000_000
 
-# --- AFT200 CAN ID ---
-CAN_ID_FORCE  = 0x001
+CAN_ID_FORCE = 0x001
 CAN_ID_TORQUE = 0x002
 
-# --- 로봇 설정 ---
-ROBOT_IP    = '192.168.0.137'
+ROBOT_IP = '192.168.0.137'
 ROBOT_INDEX = 0
 
+# Switch this single value to move between dry-run debugging and real control.
+# False: print F/T, virtual target, computed command direction only.
+# True: enter teleop mode and send MoveTeleL commands to the robot.
+APPLY_ROBOT_COMMANDS = True
+
+
 # ===================================================================
-# [제어 파라미터]
+# Control parameters
 # ===================================================================
 
-BIAS_SAMPLE_COUNT  = 200
-BIAS_SAMPLE_DELAY  = 0.005
+BIAS_SAMPLE_COUNT = 200
+BIAS_SAMPLE_DELAY = 0.005
 
-# -----------------------------------------------------------------------
-# 힘 Threshold (데드밴드) [N]
-#
-# ★ Z축 드리프트 원인:
-#   중력/케이블 하중이 bias 후에도 ~3~4N 잔류 오프셋으로 남아
-#   아무도 안 건드려도 -Z 방향으로 조금씩 이동함.
-# -----------------------------------------------------------------------
-FORCE_THRESHOLD_XY = 0.5   # X, Y 방향 데드밴드 [N]
-FORCE_THRESHOLD_Z  = 1.0   # Z 방향 데드밴드 [N]  ← 중력 잔류 오프셋 흡수
+# Input deadbands.
+FORCE_THRESHOLD_XY = 0.5       # N
+FORCE_THRESHOLD_Z = 1.0        # N
+TORQUE_THRESHOLD_RXRY = 0.05   # Nm
+TORQUE_THRESHOLD_RZ = 0.05     # Nm
 
-# -----------------------------------------------------------------------
-# 토크 Threshold (데드밴드) [N·m]
-# -----------------------------------------------------------------------
-TORQUE_THRESHOLD_XY = 0.05  # Tx, Ty 방향 데드밴드 [N·m]
-TORQUE_THRESHOLD_Z  = 0.05  # Tz 방향 데드밴드 [N·m]
+# How fast the operator's wrench moves the virtual target.
+# This is the "handle sensitivity" before the robot follows the target.
+VIRTUAL_POINT_FORCE_GAIN_XY = 2.0       # mm / (N*s)
+VIRTUAL_POINT_FORCE_GAIN_Z = 1.5        # mm / (N*s)
+VIRTUAL_POINT_TORQUE_GAIN_RXRY = 5.0    # deg / (Nm*s)
+VIRTUAL_POINT_TORQUE_GAIN_RZ = 5.0      # deg / (Nm*s)
 
-# -----------------------------------------------------------------------
-# 순응 제어 댐핑 계수 B [N·s/mm]  →  증분 이동량 = F / B * dt
-#   값이 작을수록 같은 힘에 더 빠르게(민감하게) 반응
-#   예: B=5  → 5N 인가 시 약 2mm/루프(100mm/s @50Hz)
-# -----------------------------------------------------------------------
-ADMITTANCE_B_XY = 0.25    # X, Y 방향 댐핑 [N·s/mm] ← 낮출수록 부드러움 (1.0~2.0 권장)
-ADMITTANCE_B_Z  = 0.25    # Z 방향 댐핑 [N·s/mm]
+# Spring-damper follow dynamics: D * x_dot = K * error.
+# Higher K/D ratio follows the virtual target faster.
+STIFFNESS_XY = 1.0           # N/mm
+STIFFNESS_Z = 1.0            # N/mm
+DAMPING_XY = 0.25            # N*s/mm
+DAMPING_Z = 0.25             # N*s/mm
 
-# -----------------------------------------------------------------------
-# 순응 제어 댐핑 계수 B_rot [N·m·s/deg]  →  증분 회전량 = T / B_rot * dt
-#   값이 작을수록 같은 토크에 더 빠르게(민감하게) 반응
-#   예: B_rot=0.01 → 0.1N·m 인가 시 약 0.2deg/루프(10deg/s @50Hz)
-#   ★ 처음엔 크게 잡고(0.05~0.1) 조금씩 줄이며 튜닝할 것 (급회전 위험)
-# -----------------------------------------------------------------------
-ADMITTANCE_B_ROT_XY = 0.05  # Rx, Ry 방향 댐핑 [N·m·s/deg]
-ADMITTANCE_B_ROT_Z  = 0.05  # Rz 방향 댐핑 [N·m·s/deg]
+ROT_STIFFNESS_RXRY = 0.10    # Nm/deg
+ROT_STIFFNESS_RZ = 0.10      # Nm/deg
+ROT_DAMPING_RXRY = 0.05      # Nm*s/deg
+ROT_DAMPING_RZ = 0.05        # Nm*s/deg
 
-# 한 루프 최대 증분 이동량 클리핑 [mm] (안전)
-MAX_STEP_MM  = 5.0
+# Safety clamps per control loop.
+MAX_VIRTUAL_STEP_MM = 5.0
+MAX_VIRTUAL_STEP_DEG = 1.0
+MAX_COMMAND_STEP_MM = 2.0
+MAX_COMMAND_STEP_DEG = 0.25
 
-# 한 루프 최대 증분 회전량 클리핑 [deg] (안전)
-MAX_STEP_DEG = 3.0
-
-# 텔레오퍼레이션 속도/가속도 비율
-TEL_VEL_RATIO = 0.25
+TEL_VEL_RATIO = 0.5
 TEL_ACC_RATIO = 1.0
 
-# 제어 루프 주기 [초]
-CONTROL_PERIOD = 0.02   # 50 Hz
+CONTROL_PERIOD = 0.02
+MAX_DT = CONTROL_PERIOD * 2
 
-# -----------------------------------------------------------------------
-# dt 스파이크 상한 [초]
-# 네트워크 지연/GC 등으로 dt가 100ms+ 로 튀면 step이 폭발.
-# 실제 dt가 이 값을 넘으면 CONTROL_PERIOD 로 고정하여 안전하게 처리.
-# -----------------------------------------------------------------------
-MAX_DT = CONTROL_PERIOD * 2   # 40ms
+AXIS_NAMES = ['X(tool)', 'Y(tool)', 'Z(tool)', 'Rx(tool)', 'Ry(tool)', 'Rz(tool)']
+AXIS_UNITS = ['mm', 'mm', 'mm', 'deg', 'deg', 'deg']
+
 
 # ===================================================================
-# 축 이름 (로그 표시용)
+# Logging
 # ===================================================================
-AXIS_NAMES     = ['X(tool)', 'Y(tool)', 'Z(tool)']
-ROT_AXIS_NAMES = ['Rx(tool)', 'Ry(tool)', 'Rz(tool)']
 
-# ===================================================================
-# 로깅 설정
-# ===================================================================
 logging.basicConfig(
     level=logging.DEBUG,
     format='[%(asctime)s] %(levelname)s %(message)s',
     datefmt='%H:%M:%S',
     handlers=[logging.StreamHandler(sys.stdout)],
 )
-log = logging.getLogger('ForceFollow')
+log = logging.getLogger('VirtualAdmittance')
 
 
 # ===================================================================
-# F/T 센서 리더 (백그라운드 스레드)
+# F/T sensor reader
 # ===================================================================
 
 class FTSensorReader(object):
     def __init__(self, interface, channel, bitrate):
         self._interface = interface
-        self._channel   = channel
-        self._bitrate   = bitrate
-        self._lock      = threading.Lock()
+        self._channel = channel
+        self._bitrate = bitrate
+        self._lock = threading.Lock()
         self._Fx = self._Fy = self._Fz = 0.0
         self._Tx = self._Ty = self._Tz = 0.0
-        self._running  = False
-        self._thread   = None
-        self._bus      = None
+        self._running = False
+        self._thread = None
+        self._bus = None
         self._new_data = threading.Event()
 
     def start(self):
-        log.info('CAN 버스 초기화: interface=%s, channel=%s, bitrate=%d',
+        log.info('Initializing CAN bus: interface=%s, channel=%s, bitrate=%d',
                  self._interface, self._channel, self._bitrate)
         self._bus = can.Bus(
             interface=self._interface,
@@ -154,9 +146,9 @@ class FTSensorReader(object):
         )
         self._send_start_command()
         self._running = True
-        self._thread  = threading.Thread(target=self._recv_loop, name='FTReader', daemon=True)
+        self._thread = threading.Thread(target=self._recv_loop, name='FTReader', daemon=True)
         self._thread.start()
-        log.info('F/T 센서 수신 스레드 시작')
+        log.info('F/T sensor receiver started')
 
     def stop(self):
         self._running = False
@@ -164,24 +156,25 @@ class FTSensorReader(object):
             self._thread.join(timeout=3.0)
         if self._bus is not None:
             self._bus.shutdown()
-        log.info('F/T 센서 수신 스레드 종료, CAN 버스 닫힘')
+        log.info('F/T sensor receiver stopped')
 
     def _send_start_command(self):
         data = [0x04, 0x02, 0x06, 0x01, 0x03, 0x01]
-        cmd  = can.Message(arbitration_id=0x000, data=data, is_extended_id=False)
+        cmd = can.Message(arbitration_id=0x000, data=data, is_extended_id=False)
         try:
             self._bus.send(cmd)
-            log.debug('센서 시작 명령 전송 완료')
+            log.debug('Sensor start command sent')
         except can.CanError as e:
-            log.warning('시작 명령 전송 실패 (자동 스트리밍 모드이면 무시): %s', e)
+            log.warning('Sensor start command failed, ignored if streaming already: %s', e)
 
     def _recv_loop(self):
         while self._running:
             try:
                 msg = self._bus.recv(timeout=1.0)
                 if msg is None:
-                    log.warning('[CAN] 수신 타임아웃 - 센서 연결 확인 필요')
+                    log.warning('[CAN] receive timeout - check sensor connection')
                     continue
+
                 if msg.arbitration_id == CAN_ID_FORCE:
                     d = msg.data
                     with self._lock:
@@ -198,7 +191,7 @@ class FTSensorReader(object):
                     self._new_data.set()
             except Exception as e:
                 if self._running:
-                    log.error('[CAN] 수신 오류: %s', e)
+                    log.error('[CAN] receive error: %s', e)
 
     def get_ft(self):
         with self._lock:
@@ -210,320 +203,320 @@ class FTSensorReader(object):
 
 
 # ===================================================================
-# 0점 보정
+# Control helpers
 # ===================================================================
 
+def clip(val, limit):
+    return max(-limit, min(limit, val))
+
+
+def deadband(val, threshold):
+    if abs(val) < threshold:
+        return 0.0
+    return (val - threshold) if val > 0 else (val + threshold)
+
+
 def measure_bias(sensor, n_samples=BIAS_SAMPLE_COUNT, delay=BIAS_SAMPLE_DELAY):
-    log.info('0점 보정 시작: %d 샘플 수집 중... (로봇/센서 정지 상태 유지)', n_samples)
+    log.info('Bias measurement: collecting %d samples. Keep robot and sensor still.', n_samples)
     accum = [0.0] * 6
     for _ in range(n_samples):
         ft = sensor.get_ft()
         for j in range(6):
             accum[j] += ft[j]
         time.sleep(delay)
+
     bias = [accum[j] / n_samples for j in range(6)]
-    log.info('0점 보정 완료: Fx=%.3fN  Fy=%.3fN  Fz=%.3fN  Tx=%.3fNm  Ty=%.3fNm  Tz=%.3fNm',
+    log.info('Bias: F=[%.3f, %.3f, %.3f]N, T=[%.3f, %.3f, %.3f]Nm',
              bias[0], bias[1], bias[2], bias[3], bias[4], bias[5])
     return bias
 
 
-# ===================================================================
-# 순응 제어 모델: 외력 → 이번 루프 증분 이동량 (velocity * dt)
-#
-#   기존 어드미턴스:  disp = F / K  (스프링 모델 → 힘 풀면 원위치)
-#   순응 제어:        step = F / B * dt  (댐퍼 모델 → 힘 풀면 정지)
-#
-# movetelel_rel(RELATIVE 모드)는 start_teleop 시점 기준 상대 위치를
-# 목표로 삼으므로, 매 루프 증분(step)을 누적하여 전달해야
-# 직접교시처럼 동작합니다.
-# ===================================================================
-
-def compute_step(ft_compensated, dt):
-    # type: (List[float], float) -> List[float]
-    """
-    보정된 힘 → 이번 루프 이동 증분(mm)
-
-    반환값: [step_x, step_y, step_z, 0, 0, 0]  (tool 좌표계 기준)
-    """
-    Fx, Fy, Fz = ft_compensated[0], ft_compensated[1], ft_compensated[2]
-    Tx, Ty, Tz = ft_compensated[3], ft_compensated[4], ft_compensated[5]
-
-    def deadband(val, threshold):
-        if abs(val) < threshold:
-            return 0.0
-        return (val - threshold) if val > 0 else (val + threshold)
-
-    # 힘 → 선형 이동 증분 [mm]
-    Fx_eff = deadband(Fx, FORCE_THRESHOLD_XY)
-    Fy_eff = deadband(Fy, FORCE_THRESHOLD_XY)
-    Fz_eff = deadband(Fz, FORCE_THRESHOLD_Z)
-
-    # 댐퍼 모델: step = (F / B) * dt  [mm]
-    sx = (Fx_eff / ADMITTANCE_B_XY) * dt
-    sy = (Fy_eff / ADMITTANCE_B_XY) * dt
-    sz = (Fz_eff / ADMITTANCE_B_Z)  * dt
-
-    # 토크 → 회전 증분 [deg]
-    Tx_eff = deadband(Tx, TORQUE_THRESHOLD_XY)
-    Ty_eff = deadband(Ty, TORQUE_THRESHOLD_XY)
-    Tz_eff = deadband(Tz, TORQUE_THRESHOLD_Z)
-
-    # 댐퍼 모델: step_rot = (T / B_rot) * dt  [deg]
-    srx = (Tx_eff / ADMITTANCE_B_ROT_XY) * dt
-    sry = (Ty_eff / ADMITTANCE_B_ROT_XY) * dt
-    srz = (Tz_eff / ADMITTANCE_B_ROT_Z)  * dt
-
-    def clip(val, limit):
-        return max(-limit, min(limit, val))
-
-    sx  = clip(sx,  MAX_STEP_MM)
-    sy  = clip(sy,  MAX_STEP_MM)
-    sz  = clip(sz,  MAX_STEP_MM)
-    srx = clip(srx, MAX_STEP_DEG)
-    sry = clip(sry, MAX_STEP_DEG)
-    srz = clip(srz, MAX_STEP_DEG)
-
-    return [sx, sy, sz, srx, sry, srz]
+def compensate_and_deadband(ft_raw, bias):
+    ft_comp = [ft_raw[i] - bias[i] for i in range(6)]
+    wrench_eff = [
+        deadband(ft_comp[0], FORCE_THRESHOLD_XY),
+        deadband(ft_comp[1], FORCE_THRESHOLD_XY),
+        deadband(ft_comp[2], FORCE_THRESHOLD_Z),
+        deadband(ft_comp[3], TORQUE_THRESHOLD_RXRY),
+        deadband(ft_comp[4], TORQUE_THRESHOLD_RXRY),
+        deadband(ft_comp[5], TORQUE_THRESHOLD_RZ),
+    ]
+    return ft_comp, wrench_eff
 
 
-# ===================================================================
-# 로봇 상태 확인
-# ===================================================================
+def update_virtual_target(virtual_pose, wrench_eff, dt):
+    # type: (List[float], List[float], float) -> List[float]
+    virtual_step = [
+        wrench_eff[0] * VIRTUAL_POINT_FORCE_GAIN_XY * dt,
+        wrench_eff[1] * VIRTUAL_POINT_FORCE_GAIN_XY * dt,
+        wrench_eff[2] * VIRTUAL_POINT_FORCE_GAIN_Z * dt,
+        wrench_eff[3] * VIRTUAL_POINT_TORQUE_GAIN_RXRY * dt,
+        wrench_eff[4] * VIRTUAL_POINT_TORQUE_GAIN_RXRY * dt,
+        wrench_eff[5] * VIRTUAL_POINT_TORQUE_GAIN_RZ * dt,
+    ]
+
+    for i in range(3):
+        virtual_step[i] = clip(virtual_step[i], MAX_VIRTUAL_STEP_MM)
+    for i in range(3, 6):
+        virtual_step[i] = clip(virtual_step[i], MAX_VIRTUAL_STEP_DEG)
+
+    for i in range(6):
+        virtual_pose[i] += virtual_step[i]
+
+    return virtual_step
+
+
+def compute_spring_damper_step(virtual_pose, command_pose, dt):
+    # type: (List[float], List[float], float) -> Tuple[List[float], List[float]]
+    error = [virtual_pose[i] - command_pose[i] for i in range(6)]
+
+    gains = [
+        STIFFNESS_XY / DAMPING_XY,
+        STIFFNESS_XY / DAMPING_XY,
+        STIFFNESS_Z / DAMPING_Z,
+        ROT_STIFFNESS_RXRY / ROT_DAMPING_RXRY,
+        ROT_STIFFNESS_RXRY / ROT_DAMPING_RXRY,
+        ROT_STIFFNESS_RZ / ROT_DAMPING_RZ,
+    ]
+    command_step = [gains[i] * error[i] * dt for i in range(6)]
+
+    for i in range(3):
+        command_step[i] = clip(command_step[i], MAX_COMMAND_STEP_MM)
+    for i in range(3, 6):
+        command_step[i] = clip(command_step[i], MAX_COMMAND_STEP_DEG)
+
+    return command_step, error
+
 
 def check_robot_connection(indy):
     try:
         robot_data = indy.get_robot_data()
-        op_state   = robot_data.get('op_state', -1)
-        sim_mode   = robot_data.get('sim_mode', False)
-        log.info('로봇 연결 확인: op_state=%d, sim_mode=%s', op_state, sim_mode)
-        ABNORMAL = {0, 2, 3, 8, 15}
-        if op_state in ABNORMAL:
-            log.error('로봇 비정상 상태: op_state=%d', op_state)
+        op_state = robot_data.get('op_state', -1)
+        sim_mode = robot_data.get('sim_mode', False)
+        log.info('Robot state: op_state=%d, sim_mode=%s', op_state, sim_mode)
+
+        abnormal = {0, 2, 3, 8, 15}
+        if op_state in abnormal:
+            log.error('Robot is in abnormal state: op_state=%d', op_state)
             return False
         if sim_mode:
-            log.warning('시뮬레이션 모드 활성화 - 실제 로봇이 움직이지 않습니다.')
+            log.warning('Simulation mode is active; real robot may not move.')
         return True
     except Exception as e:
-        log.error('로봇 연결 확인 실패: %s', e)
+        log.error('Robot connection check failed: %s', e)
         return False
 
 
-# ===================================================================
-# 상태 로그 출력 (10루프마다)
-# ===================================================================
-
-def log_status(ft_raw, ft_comp, step, cum_disp, loop_count):
-    # type: (List[float], List[float], List[float], List[float], int) -> None
+def log_status(ft_raw, ft_comp, wrench_eff, virtual_step, command_step,
+               virtual_pose, command_pose, error, loop_count):
     if loop_count % 10 != 0:
         return
 
-    # 실제 이동 중인 축 표시
     moving_axes = []
     for i, name in enumerate(AXIS_NAMES):
-        if abs(step[i]) > 1e-4:
-            direction = '+' if step[i] > 0 else '-'
-            moving_axes.append('{}{} {:.2f}mm'.format(direction, name, abs(step[i])))
-    for i, name in enumerate(ROT_AXIS_NAMES):
-        if abs(step[3 + i]) > 1e-4:
-            direction = '+' if step[3 + i] > 0 else '-'
-            moving_axes.append('{}{} {:.2f}deg'.format(direction, name, abs(step[3 + i])))
-    move_str = ', '.join(moving_axes) if moving_axes else '정지'
+        if abs(command_step[i]) > 1e-4:
+            direction = '+' if command_step[i] > 0 else '-'
+            moving_axes.append('{}{} {:.3f}{}'.format(
+                direction, name, abs(command_step[i]), AXIS_UNITS[i]
+            ))
+    move_str = ', '.join(moving_axes) if moving_axes else 'stop'
 
     log.debug(
-        '[Loop %4d] RAW F=[%+6.2f, %+6.2f, %+6.2f]N  T=[%+6.3f, %+6.3f, %+6.3f]Nm  '
-        'COMP F=[%+6.2f, %+6.2f, %+6.2f]N  T=[%+6.3f, %+6.3f, %+6.3f]Nm  '
-        '증분 XYZ=[%+6.3f, %+6.3f, %+6.3f]mm  RxRyRz=[%+6.3f, %+6.3f, %+6.3f]deg  '
-        '누적 XYZ=[%+7.2f, %+7.2f, %+7.2f]mm  RxRyRz=[%+7.2f, %+7.2f, %+7.2f]deg  '
-        '이동 축: %s',
+        '[Loop %4d] RAW F=[%+6.2f,%+6.2f,%+6.2f]N RAW T=[%+6.3f,%+6.3f,%+6.3f]Nm',
         loop_count,
-        ft_raw[0],  ft_raw[1],  ft_raw[2],
-        ft_raw[3],  ft_raw[4],  ft_raw[5],
+        ft_raw[0], ft_raw[1], ft_raw[2],
+        ft_raw[3], ft_raw[4], ft_raw[5],
+    )
+    log.debug(
+        '[Loop %4d] COMP F=[%+6.2f,%+6.2f,%+6.2f]N COMP T=[%+6.3f,%+6.3f,%+6.3f]Nm '
+        'EFF=[%+6.2f,%+6.2f,%+6.2f,%+6.3f,%+6.3f,%+6.3f]',
+        loop_count,
         ft_comp[0], ft_comp[1], ft_comp[2],
         ft_comp[3], ft_comp[4], ft_comp[5],
-        step[0],    step[1],    step[2],
-        step[3],    step[4],    step[5],
-        cum_disp[0], cum_disp[1], cum_disp[2],
-        cum_disp[3], cum_disp[4], cum_disp[5],
+        wrench_eff[0], wrench_eff[1], wrench_eff[2],
+        wrench_eff[3], wrench_eff[4], wrench_eff[5],
+    )
+    log.debug(
+        '[Loop %4d] virtual_step=[%+.3f,%+.3f,%+.3f]mm/[%+.3f,%+.3f,%+.3f]deg '
+        'error=[%+.3f,%+.3f,%+.3f]mm/[%+.3f,%+.3f,%+.3f]deg',
+        loop_count,
+        virtual_step[0], virtual_step[1], virtual_step[2],
+        virtual_step[3], virtual_step[4], virtual_step[5],
+        error[0], error[1], error[2], error[3], error[4], error[5],
+    )
+    log.debug(
+        '[Loop %4d] cmd_step=[%+.3f,%+.3f,%+.3f]mm/[%+.3f,%+.3f,%+.3f]deg '
+        'cmd_pose=[%+.2f,%+.2f,%+.2f]mm/[%+.2f,%+.2f,%+.2f]deg axes=%s',
+        loop_count,
+        command_step[0], command_step[1], command_step[2],
+        command_step[3], command_step[4], command_step[5],
+        command_pose[0], command_pose[1], command_pose[2],
+        command_pose[3], command_pose[4], command_pose[5],
         move_str,
+    )
+    log.debug(
+        '[Loop %4d] virtual_pose=[%+.2f,%+.2f,%+.2f]mm/[%+.2f,%+.2f,%+.2f]deg',
+        loop_count,
+        virtual_pose[0], virtual_pose[1], virtual_pose[2],
+        virtual_pose[3], virtual_pose[4], virtual_pose[5],
     )
 
 
 # ===================================================================
-# 메인 제어 루프
+# Main control loop
 # ===================================================================
 
 def main():
-    log.info('=' * 60)
-    log.info('힘 추종 직접 교시 시스템 시작')
-    log.info('제어 방식: 순응 제어 (Compliant / Direct Teaching) - 힘 + 토크')
-    log.info('F_threshold_xy=%.1fN, F_threshold_z=%.1fN, B_xy=%.2fN·s/mm, B_z=%.2fN·s/mm, max_step=%.1fmm',
-             FORCE_THRESHOLD_XY, FORCE_THRESHOLD_Z, ADMITTANCE_B_XY, ADMITTANCE_B_Z, MAX_STEP_MM)
-    log.info('T_threshold_xy=%.3fNm, T_threshold_z=%.3fNm, B_rot_xy=%.3fNm·s/deg, B_rot_z=%.3fNm·s/deg, max_step=%.1fdeg',
-             TORQUE_THRESHOLD_XY, TORQUE_THRESHOLD_Z, ADMITTANCE_B_ROT_XY, ADMITTANCE_B_ROT_Z, MAX_STEP_DEG)
-    log.info('힘 풀면 즉시 정지 (원위치 복귀 없음) - 직접교시 모드와 동일')
-    log.info('=' * 60)
+    log.info('=' * 70)
+    log.info('6-axis virtual-point admittance controller started')
+    log.info('Robot command mode: %s', 'APPLY' if APPLY_ROBOT_COMMANDS else 'DEBUG_ONLY')
+    log.info('Model: virtual target from F/T, follow with D*x_dot = K*(x_virtual - x_command)')
+    log.info('Input gain F xy/z=%.2f/%.2f mm/(N*s), T rxry/rz=%.2f/%.2f deg/(Nm*s)',
+             VIRTUAL_POINT_FORCE_GAIN_XY, VIRTUAL_POINT_FORCE_GAIN_Z,
+             VIRTUAL_POINT_TORQUE_GAIN_RXRY, VIRTUAL_POINT_TORQUE_GAIN_RZ)
+    log.info('K trans xy/z=%.2f/%.2f N/mm, D trans xy/z=%.2f/%.2f N*s/mm',
+             STIFFNESS_XY, STIFFNESS_Z, DAMPING_XY, DAMPING_Z)
+    log.info('K rot rxry/rz=%.3f/%.3f Nm/deg, D rot rxry/rz=%.3f/%.3f Nm*s/deg',
+             ROT_STIFFNESS_RXRY, ROT_STIFFNESS_RZ, ROT_DAMPING_RXRY, ROT_DAMPING_RZ)
+    log.info('=' * 70)
 
-    # ------------------------------------------------------------------
-    # 1. F/T 센서 초기화
-    # ------------------------------------------------------------------
     sensor = FTSensorReader(CAN_INTERFACE, CAN_CHANNEL, CAN_BITRATE)
     try:
         sensor.start()
     except Exception as e:
-        log.error('F/T 센서 초기화 실패: %s', e)
+        log.error('F/T sensor initialization failed: %s', e)
         return
 
-    log.info('첫 F/T 데이터 수신 대기 중...')
+    log.info('Waiting for first F/T sample...')
     if not sensor.wait_for_data(timeout=5.0):
-        log.error('F/T 센서 데이터 수신 타임아웃!')
+        log.error('F/T sensor data timeout')
         sensor.stop()
         return
-    log.info('F/T 센서 데이터 수신 확인')
+    log.info('F/T sensor data confirmed')
 
-    # ------------------------------------------------------------------
-    # 2. 로봇 연결
-    # ------------------------------------------------------------------
-    log.info('로봇 연결 중: IP=%s, index=%d', ROBOT_IP, ROBOT_INDEX)
-    try:
-        indy = IndyDCP3(robot_ip=ROBOT_IP, index=ROBOT_INDEX)
-    except Exception as e:
-        log.error('로봇 연결 실패: %s', e)
-        sensor.stop()
-        return
+    indy = None
+    if APPLY_ROBOT_COMMANDS:
+        log.info('Connecting robot: IP=%s, index=%d', ROBOT_IP, ROBOT_INDEX)
+        try:
+            indy = IndyDCP3(robot_ip=ROBOT_IP, index=ROBOT_INDEX)
+        except Exception as e:
+            log.error('Robot connection failed: %s', e)
+            sensor.stop()
+            return
 
-    if not check_robot_connection(indy):
-        sensor.stop()
-        return
+        if not check_robot_connection(indy):
+            sensor.stop()
+            return
+    else:
+        log.warning('DEBUG_ONLY mode: robot connection, teleop, and MoveTeleL commands are disabled.')
 
-    # ------------------------------------------------------------------
-    # 3. 영점 보정
-    # ------------------------------------------------------------------
-    input('\n[준비] 로봇과 센서를 정지 상태로 두고 Enter를 누르면 영점 보정을 시작합니다... ')
+    input('\nKeep robot and F/T sensor still, then press Enter to measure bias... ')
     bias = measure_bias(sensor)
 
-    # ------------------------------------------------------------------
-    # 4. 텔레오퍼레이션 시작
-    # ------------------------------------------------------------------
-    log.info('텔레오퍼레이션 모드 시작 (TaskTeleopType.RELATIVE - tool 좌표계 기준)')
-    try:
-        indy.start_teleop(2)
-        time.sleep(0.5)
-    except Exception as e:
-        log.error('텔레오퍼레이션 시작 실패: %s', e)
-        sensor.stop()
-        return
+    if APPLY_ROBOT_COMMANDS:
+        log.info('Starting teleoperation mode')
+        try:
+            indy.start_teleop(2)
+            time.sleep(0.5)
+        except Exception as e:
+            log.error('start_teleop failed: %s', e)
+            sensor.stop()
+            return
 
-    teleop_state = indy.get_teleop_state()
-    log.info('텔레오퍼레이션 상태: %s', teleop_state)
+        teleop_state = indy.get_teleop_state()
+        log.info('Teleop state: %s', teleop_state)
 
-    robot_data = indy.get_robot_data()
-    op_state   = robot_data.get('op_state', -1)
-    if op_state != 17:
-        log.error('텔레오퍼레이션 전환 실패! op_state=%d (기대값: 17=TELE_OP)', op_state)
-        log.error('Conty에서 로봇이 IDLE 상태인지, 에러가 없는지 확인하세요.')
-        indy.stop_teleop()
-        sensor.stop()
-        return
-    log.info('텔레오퍼레이션 전환 성공: op_state=17 (TELE_OP) 확인')
+        robot_data = indy.get_robot_data()
+        op_state = robot_data.get('op_state', -1)
+        if op_state != 17:
+            log.error('Teleop transition failed: op_state=%d, expected 17=TELE_OP', op_state)
+            indy.stop_teleop()
+            sensor.stop()
+            return
 
-    # ------------------------------------------------------------------
-    # 5. 순응 제어 루프
-    #
-    # RELATIVE 모드 동작 방식:
-    #   movetelel_rel(tpos) → start_teleop 시점의 위치 + tpos 로 이동
-    #
-    # 직접교시처럼 동작시키는 방법:
-    #   매 루프마다 (F/B)*dt 만큼의 증분(step)을 계산하고
-    #   cumulative_disp(누적 변위)에 더하여 전달
-    #   → 힘이 없으면 step=0 → 누적 변위 유지 → 현재 위치에서 정지
-    #   → 힘이 있으면 step≠0 → 누적 변위 증가 → 해당 방향으로 이동
-    # ------------------------------------------------------------------
-    log.info('순응 제어 루프 시작. Ctrl+C로 종료.')
-    log.info('축 매핑: tool X(앞뒤), tool Y(좌우), tool Z(상하)')
+    loop_count = 0
+    virtual_pose = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    command_pose = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    prev_time = time.time()
 
-    loop_count  = 0
-    # start_teleop 기준 누적 변위 [mm] - RELATIVE 모드 목표 위치
-    cum_disp    = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    prev_time   = time.time()
+    log.info('Control loop started. Press Ctrl+C to stop.')
 
     try:
         while True:
-            t_start  = time.time()
-            dt       = t_start - prev_time
+            t_start = time.time()
+            dt = t_start - prev_time
             prev_time = t_start
 
-            # dt 스파이크 방지: 네트워크 지연 등으로 dt가 튀면 step 폭발 가능
-            # → MAX_DT(40ms) 초과 시 CONTROL_PERIOD 로 고정
             if dt > MAX_DT:
-                log.debug('[Loop %d] dt 스파이크 감지 (%.1fms) → %.0fms로 고정',
+                log.debug('[Loop %d] dt spike %.1fms; using %.0fms',
                           loop_count, dt * 1000, CONTROL_PERIOD * 1000)
                 dt = CONTROL_PERIOD
 
-            # 5-1. F/T 읽기 + 0점 보정
-            ft_raw  = sensor.get_ft()
-            ft_comp = [ft_raw[i] - bias[i] for i in range(6)]
+            ft_raw = sensor.get_ft()
+            ft_comp, wrench_eff = compensate_and_deadband(ft_raw, bias)
 
-            # 5-2. 이번 루프 증분 계산 (댐퍼 모델)
-            step = compute_step(ft_comp, dt)
+            virtual_step = update_virtual_target(virtual_pose, wrench_eff, dt)
+            command_step, error = compute_spring_damper_step(virtual_pose, command_pose, dt)
 
-            # 5-3. 누적 변위 업데이트 (RELATIVE 모드의 목표 위치)
             for i in range(6):
-                cum_disp[i] += step[i]
+                command_pose[i] += command_step[i]
 
-            # 5-4. 상태 로그 (10루프마다, 실제 이동 축 표시)
-            log_status(ft_raw, ft_comp, step, cum_disp, loop_count)
+            log_status(
+                ft_raw, ft_comp, wrench_eff, virtual_step, command_step,
+                virtual_pose, command_pose, error, loop_count
+            )
 
-            # 5-5. 로봇 이동 명령 (TCP 좌표계 기준)
-            #   TELE_TASK_TCP: tool 좌표계 기준 증분 이동
-            #   → 로봇 자세가 바뀌어도 항상 tool 방향으로 이동
-            try:
-                indy.control.MoveTeleL(
-                    control_msgs.MoveTeleLReq(
-                        tpos=cum_disp,
-                        vel_ratio=TEL_VEL_RATIO,
-                        acc_ratio=TEL_ACC_RATIO,
-                        method=control_msgs.TELE_TASK_TCP,
+            if APPLY_ROBOT_COMMANDS:
+                try:
+                    indy.control.MoveTeleL(
+                        control_msgs.MoveTeleLReq(
+                            tpos=command_pose,
+                            vel_ratio=TEL_VEL_RATIO,
+                            acc_ratio=TEL_ACC_RATIO,
+                            method=control_msgs.TELE_TASK_TCP,
+                        )
                     )
-                )
-            except Exception as e:
-                log.error('MoveTeleL(TCP) 오류: %s', e)
-                if not check_robot_connection(indy):
-                    log.error('로봇 연결 이상 - 제어 루프 중단')
-                    break
+                except Exception as e:
+                    log.error('MoveTeleL(TCP) error: %s', e)
+                    if not check_robot_connection(indy):
+                        log.error('Robot connection abnormal; stopping control loop')
+                        break
 
             loop_count += 1
 
-            # 5-6. 주기 맞춤
-            elapsed    = time.time() - t_start
+            elapsed = time.time() - t_start
             sleep_time = CONTROL_PERIOD - elapsed
             if sleep_time > 0:
                 time.sleep(sleep_time)
             else:
-                log.warning('[Loop %d] 제어 주기 초과: %.1fms > %.0fms',
+                log.warning('[Loop %d] control period overrun: %.1fms > %.0fms',
                             loop_count, elapsed * 1000, CONTROL_PERIOD * 1000)
 
     except KeyboardInterrupt:
-        log.info('사용자 중단 (Ctrl+C)')
-
+        log.info('Interrupted by user')
     except Exception as e:
-        log.error('제어 루프 예외: %s', e, exc_info=True)
-
+        log.error('Control loop exception: %s', e, exc_info=True)
     finally:
-        log.info('텔레오퍼레이션 종료 중...')
-        try:
-            indy.stop_teleop()
-            time.sleep(0.3)
-            log.info('텔레오퍼레이션 종료 완료')
-        except Exception as e:
-            log.error('stop_teleop 오류: %s', e)
+        if APPLY_ROBOT_COMMANDS and indy is not None:
+            log.info('Stopping teleoperation...')
+            try:
+                indy.stop_teleop()
+                time.sleep(0.3)
+                log.info('Teleoperation stopped')
+            except Exception as e:
+                log.error('stop_teleop error: %s', e)
+        else:
+            log.info('DEBUG_ONLY mode: no teleoperation session to stop.')
 
         sensor.stop()
-        log.info('시스템 종료 완료. 총 제어 루프 수: %d', loop_count)
-        log.info('최종 누적 변위: X(tool)=%.2fmm, Y(tool)=%.2fmm, Z(tool)=%.2fmm  /  Rx=%.2fdeg, Ry=%.2fdeg, Rz=%.2fdeg',
-                 cum_disp[0], cum_disp[1], cum_disp[2],
-                 cum_disp[3], cum_disp[4], cum_disp[5])
+        log.info('System stopped. Total loops: %d', loop_count)
+        log.info('Final virtual pose: X=%.2f Y=%.2f Z=%.2f mm, Rx=%.2f Ry=%.2f Rz=%.2f deg',
+                 virtual_pose[0], virtual_pose[1], virtual_pose[2],
+                 virtual_pose[3], virtual_pose[4], virtual_pose[5])
+        log.info('Final command pose: X=%.2f Y=%.2f Z=%.2f mm, Rx=%.2f Ry=%.2f Rz=%.2f deg',
+                 command_pose[0], command_pose[1], command_pose[2],
+                 command_pose[3], command_pose[4], command_pose[5])
 
 
-# ===================================================================
 if __name__ == '__main__':
     main()
