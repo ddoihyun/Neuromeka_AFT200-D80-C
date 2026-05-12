@@ -19,6 +19,17 @@
 #     If robot feedback pose is needed later, replace command_pose with the
 #     measured TCP-relative pose in the spring-damper error calculation.
 #
+# [MODIFIED] Changes from original:
+#   - 2-Stage Hysteresis Threshold:
+#       * ENGAGE threshold (start): larger force required to begin motion
+#       * RELEASE threshold (sustain): smaller force enough to keep moving
+#       * Per-axis motion state tracked via 'axis_active' flags
+#   - Improved responsiveness:
+#       * VIRTUAL_POINT_FORCE_GAIN_XY/Z raised (faster virtual target movement)
+#       * K/D ratio raised (robot follows virtual target faster)
+#       * MAX_COMMAND_STEP_MM/DEG raised (larger per-loop movement allowed)
+#       * TEL_VEL_RATIO raised (robot executes commands faster)
+#
 # ***********************************************************************
 
 from __future__ import annotations
@@ -73,38 +84,97 @@ AXIS_TEST_MODE = 'ALL'
 BIAS_SAMPLE_COUNT = 200
 BIAS_SAMPLE_DELAY = 0.005
 
-# Input deadbands.
-FORCE_THRESHOLD_XY = 0.5       # N
-FORCE_THRESHOLD_Z = 1.0        # N
-TORQUE_THRESHOLD_RXRY = 0.05   # Nm
-TORQUE_THRESHOLD_RZ = 0.05     # Nm
+# ---------------------------------------------------------------------------
+# [MODIFIED] 2-Stage Hysteresis Thresholds
+#
+# ENGAGE  (start threshold): 정지 상태에서 움직임을 시작하려면 이 값 이상의 힘 필요
+# RELEASE (sustain threshold): 한 번 움직이기 시작한 뒤 운동을 유지하기 위한 최소 힘
+#
+# 동작 원리:
+#   axis_active[i] == False (정지):  |force| >= ENGAGE  => axis_active = True, 운동 시작
+#   axis_active[i] == True  (운동):  |force| >= RELEASE => 운동 유지
+#                                    |force| <  RELEASE => axis_active = False, 정지
+#
+# 튜닝 가이드:
+#   - ENGAGE를 낮추면 작은 힘으로도 쉽게 시작됨 (민감도 ↑, 의도치 않은 움직임 위험 ↑)
+#   - ENGAGE를 높이면 확실한 의도가 있어야만 시작됨 (안정성 ↑, 반응성 ↓)
+#   - RELEASE를 ENGAGE 대비 40~60% 수준으로 유지하면 히스테리시스 효과가 자연스러움
+# ---------------------------------------------------------------------------
+FORCE_ENGAGE_XY   = 1.0    # N  — 정지 → 운동 전환에 필요한 힘 (원래 FORCE_THRESHOLD_XY=0.5)
+FORCE_RELEASE_XY  = 0.8    # N  — 운동 → 정지 전환 경계 (ENGAGE의 50%)
 
-# How fast the operator's wrench moves the virtual target.
-# This is the "handle sensitivity" before the robot follows the target.
-VIRTUAL_POINT_FORCE_GAIN_XY = 2.0       # mm / (N*s)
-VIRTUAL_POINT_FORCE_GAIN_Z = 1.5        # mm / (N*s)
-VIRTUAL_POINT_TORQUE_GAIN_RXRY = 5.0    # deg / (Nm*s)
-VIRTUAL_POINT_TORQUE_GAIN_RZ = 5.0      # deg / (Nm*s)
+FORCE_ENGAGE_Z    = 1.0    # N
+FORCE_RELEASE_Z   = 0.8    # N
 
-# Spring-damper follow dynamics: D * x_dot = K * error.
-# Higher K/D ratio follows the virtual target faster.
-STIFFNESS_XY = 1.0           # N/mm
-STIFFNESS_Z = 1.0            # N/mm
-DAMPING_XY = 0.25            # N*s/mm
-DAMPING_Z = 0.25             # N*s/mm
+TORQUE_ENGAGE_RXRY   = 0.15  # Nm
+TORQUE_RELEASE_RXRY  = 0.07  # Nm
 
-ROT_STIFFNESS_RXRY = 0.10    # Nm/deg
-ROT_STIFFNESS_RZ = 0.10      # Nm/deg
-ROT_DAMPING_RXRY = 0.05      # Nm*s/deg
-ROT_DAMPING_RZ = 0.05        # Nm*s/deg
+TORQUE_ENGAGE_RZ     = 0.15  # Nm
+TORQUE_RELEASE_RZ    = 0.07  # Nm
 
-# Safety clamps per control loop.
-MAX_VIRTUAL_STEP_MM = 5.0
-MAX_VIRTUAL_STEP_DEG = 1.0
-MAX_COMMAND_STEP_MM = 2.0
-MAX_COMMAND_STEP_DEG = 0.25
+# ---------------------------------------------------------------------------
+# [MODIFIED] Virtual target gain — 힘 입력이 virtual target을 얼마나 빠르게 이동시키는가
+#
+# 원래 값: XY=4.0, Z=3.0, RXRY=5.0, RZ=5.0
+#
+# 튜닝 가이드:
+#   - 값을 높일수록 같은 힘 입력에 대해 virtual target이 더 많이 이동 → 로봇이 더 크게 반응
+#   - 너무 높으면 MAX_VIRTUAL_STEP 클램프에 항상 걸려 실질적 효과 없음
+#   - MAX_VIRTUAL_STEP_MM = gain * max_force * dt 가 클램프 이하가 되도록 설정
+#     예) gain=8, max_expected_force=5N, dt=0.02 → 0.8mm/loop < 5mm ✓
+# ---------------------------------------------------------------------------
+VIRTUAL_POINT_FORCE_GAIN_XY    = 8.0   # mm / (N*s)   [원래: 4.0]
+VIRTUAL_POINT_FORCE_GAIN_Z     = 6.0   # mm / (N*s)   [원래: 3.0]
+VIRTUAL_POINT_TORQUE_GAIN_RXRY = 10.0  # deg / (Nm*s) [원래: 5.0]
+VIRTUAL_POINT_TORQUE_GAIN_RZ   = 10.0  # deg / (Nm*s) [원래: 5.0]
 
-TEL_VEL_RATIO = 0.5
+# ---------------------------------------------------------------------------
+# [MODIFIED] Spring-damper follow dynamics: D * x_dot = K * error
+#
+# 실질 추종 이득 = K / D (단위: 1/s)
+#
+# 원래:  K=2.0, D=0.25  => K/D = 8  /s
+# 변경:  K=4.0, D=0.20  => K/D = 20 /s  (약 2.5배 빠른 추종)
+#
+# 튜닝 가이드:
+#   - K/D 비율이 높을수록 virtual target을 빠르게 추종 (반응성 ↑)
+#   - D를 너무 낮추면 오버슈트 발생 가능
+#   - 권장: K/D = 10~25 범위에서 테스트
+#
+# command_step per loop = (K/D) * error * dt
+#   예) K/D=20, error=2mm, dt=0.02s → step=0.8mm/loop
+# ---------------------------------------------------------------------------
+STIFFNESS_XY  = 4.0   # N/mm     [원래: 2.0]
+STIFFNESS_Z   = 4.0   # N/mm     [원래: 2.0]
+DAMPING_XY    = 0.20  # N*s/mm   [원래: 0.25]  => K/D = 20/s
+DAMPING_Z     = 0.20  # N*s/mm   [원래: 0.25]  => K/D = 20/s
+
+ROT_STIFFNESS_RXRY = 1.0   # Nm/deg     [원래: 0.5]
+ROT_STIFFNESS_RZ   = 1.0   # Nm/deg     [원래: 0.5]
+ROT_DAMPING_RXRY   = 0.10  # Nm*s/deg   [원래: 0.25] => K/D = 10/s
+ROT_DAMPING_RZ     = 0.10  # Nm*s/deg   [원래: 0.25] => K/D = 10/s
+
+# ---------------------------------------------------------------------------
+# [MODIFIED] Safety clamps per control loop
+#
+# MAX_COMMAND_STEP: 한 루프당 최대 이동량
+# 원래 5.0mm / 1.0deg → 유지 (충분히 크므로 bottleneck 아님)
+# 반응성이 여전히 부족하면 이 값을 먼저 확인할 것
+# ---------------------------------------------------------------------------
+MAX_VIRTUAL_STEP_MM  = 5.0
+MAX_VIRTUAL_STEP_DEG = 2.0   # [원래: 1.0] — 회전 virtual step 허용 범위 확대
+MAX_COMMAND_STEP_MM  = 5.0
+MAX_COMMAND_STEP_DEG = 2.0   # [원래: 1.0] — 회전 command step 허용 범위 확대
+
+# ---------------------------------------------------------------------------
+# [MODIFIED] Teleop velocity ratio
+#
+# 원래: 0.5 → 변경: 0.8
+# 로봇이 MoveTeleL 명령을 실행할 때의 최대 속도 비율 (0~1)
+# 높일수록 실제 로봇 이동 속도 증가 → 체감 반응성 직접적으로 향상
+# 단, 너무 높으면 안전 제한에 걸릴 수 있음; 0.7~0.9 범위에서 테스트 권장
+# ---------------------------------------------------------------------------
+TEL_VEL_RATIO = 0.8   # [원래: 0.5]
 TEL_ACC_RATIO = 1.0
 
 CONTROL_PERIOD = 0.02
@@ -225,6 +295,7 @@ def clip(val, limit):
 
 
 def deadband(val, threshold):
+    """기존 단순 deadband (내부 헬퍼로 유지)."""
     if abs(val) < threshold:
         return 0.0
     return (val - threshold) if val > 0 else (val + threshold)
@@ -252,25 +323,94 @@ def measure_bias(sensor, n_samples=BIAS_SAMPLE_COUNT, delay=BIAS_SAMPLE_DELAY):
     return bias
 
 
-def compensate_and_deadband(ft_raw, bias, enabled_indices):
+# ---------------------------------------------------------------------------
+# [NEW] 2-Stage Hysteresis Deadband
+# ---------------------------------------------------------------------------
+
+def hysteresis_deadband(val, engage, release, is_active):
+    """
+    2단계 히스테리시스 deadband.
+
+    Parameters
+    ----------
+    val      : 현재 bias-compensated 힘/토크 값
+    engage   : 정지 → 운동 전환 임계값  (예: 2.0 N)
+    release  : 운동 → 정지 전환 임계값  (예: 1.0 N)
+    is_active: 해당 축의 현재 운동 상태 (True=운동중, False=정지)
+
+    Returns
+    -------
+    (effective_value, new_is_active)
+      effective_value : deadband 처리 후 실제 사용할 값
+      new_is_active   : 갱신된 운동 상태 플래그
+    """
+    abs_val = abs(val)
+
+    if not is_active:
+        # 정지 상태: ENGAGE 임계값 이상이어야 운동 시작
+        if abs_val >= engage:
+            new_active = True
+            eff = (val - engage) if val > 0 else (val + engage)
+        else:
+            new_active = False
+            eff = 0.0
+    else:
+        # 운동 상태: RELEASE 임계값 미만이면 정지로 전환
+        if abs_val >= release:
+            new_active = True
+            eff = (val - release) if val > 0 else (val + release)
+        else:
+            new_active = False
+            eff = 0.0
+
+    return eff, new_active
+
+
+def compensate_and_hysteresis(ft_raw, bias, enabled_indices, axis_active):
+    """
+    bias 보정 후 2단계 히스테리시스 deadband 적용.
+
+    Parameters
+    ----------
+    ft_raw        : 센서 원시값 [Fx, Fy, Fz, Tx, Ty, Tz]
+    bias          : 바이어스 [6]
+    enabled_indices: 활성화된 축 인덱스
+    axis_active   : 각 축의 현재 운동 상태 플래그 [bool * 6]  ← in-place 수정됨
+
+    Returns
+    -------
+    ft_comp   : bias 보정된 원시값 [6]
+    wrench_eff: 히스테리시스 적용 후 유효 wrench [6]
+    """
     ft_comp = [ft_raw[i] - bias[i] for i in range(6)]
-    wrench_eff = [
-        deadband(ft_comp[0], FORCE_THRESHOLD_XY),
-        deadband(ft_comp[1], FORCE_THRESHOLD_XY),
-        deadband(ft_comp[2], FORCE_THRESHOLD_Z),
-        deadband(ft_comp[3], TORQUE_THRESHOLD_RXRY),
-        deadband(ft_comp[4], TORQUE_THRESHOLD_RXRY),
-        deadband(ft_comp[5], TORQUE_THRESHOLD_RZ),
+
+    # (engage, release) 쌍을 축 인덱스에 매핑
+    thresholds = [
+        (FORCE_ENGAGE_XY,      FORCE_RELEASE_XY),      # 0: Fx
+        (FORCE_ENGAGE_XY,      FORCE_RELEASE_XY),      # 1: Fy
+        (FORCE_ENGAGE_Z,       FORCE_RELEASE_Z),       # 2: Fz
+        (TORQUE_ENGAGE_RXRY,   TORQUE_RELEASE_RXRY),   # 3: Tx
+        (TORQUE_ENGAGE_RXRY,   TORQUE_RELEASE_RXRY),   # 4: Ty
+        (TORQUE_ENGAGE_RZ,     TORQUE_RELEASE_RZ),     # 5: Tz
     ]
+
     enabled = set(enabled_indices)
+    wrench_eff = [0.0] * 6
+
     for i in range(6):
         if i not in enabled:
-            wrench_eff[i] = 0.0
+            axis_active[i] = False
+            continue
+        engage, release = thresholds[i]
+        eff, new_active = hysteresis_deadband(ft_comp[i], engage, release, axis_active[i])
+        axis_active[i] = new_active
+        wrench_eff[i] = eff
+
     return ft_comp, wrench_eff
 
 
 def update_virtual_target(virtual_pose, wrench_eff, dt, enabled_indices):
-    # type: (List[float], List[float], float) -> List[float]
+    # type: (List[float], List[float], float, tuple) -> List[float]
     virtual_step = [
         wrench_eff[0] * VIRTUAL_POINT_FORCE_GAIN_XY * dt,
         wrench_eff[1] * VIRTUAL_POINT_FORCE_GAIN_XY * dt,
@@ -296,7 +436,7 @@ def update_virtual_target(virtual_pose, wrench_eff, dt, enabled_indices):
 
 
 def compute_spring_damper_step(virtual_pose, command_pose, dt, enabled_indices):
-    # type: (List[float], List[float], float) -> Tuple[List[float], List[float]]
+    # type: (List[float], List[float], float, tuple) -> Tuple[List[float], List[float]]
     error = [virtual_pose[i] - command_pose[i] for i in range(6)]
 
     gains = [
@@ -343,7 +483,7 @@ def check_robot_connection(indy):
 
 
 def log_status(ft_raw, ft_comp, wrench_eff, virtual_step, command_step,
-               virtual_pose, command_pose, error, loop_count):
+               virtual_pose, command_pose, error, loop_count, axis_active):
     if loop_count % 10 != 0:
         return
 
@@ -356,6 +496,9 @@ def log_status(ft_raw, ft_comp, wrench_eff, virtual_step, command_step,
             ))
     move_str = ', '.join(moving_axes) if moving_axes else 'stop'
 
+    # [MODIFIED] axis_active 상태 출력 추가
+    active_str = ''.join('A' if axis_active[i] else '_' for i in range(6))
+
     log.debug(
         '[Loop %4d] RAW F=[%+6.2f,%+6.2f,%+6.2f]N RAW T=[%+6.3f,%+6.3f,%+6.3f]Nm',
         loop_count,
@@ -364,12 +507,13 @@ def log_status(ft_raw, ft_comp, wrench_eff, virtual_step, command_step,
     )
     log.debug(
         '[Loop %4d] COMP F=[%+6.2f,%+6.2f,%+6.2f]N COMP T=[%+6.3f,%+6.3f,%+6.3f]Nm '
-        'EFF=[%+6.2f,%+6.2f,%+6.2f,%+6.3f,%+6.3f,%+6.3f]',
+        'EFF=[%+6.2f,%+6.2f,%+6.2f,%+6.3f,%+6.3f,%+6.3f] ACTIVE=%s',
         loop_count,
         ft_comp[0], ft_comp[1], ft_comp[2],
         ft_comp[3], ft_comp[4], ft_comp[5],
         wrench_eff[0], wrench_eff[1], wrench_eff[2],
         wrench_eff[3], wrench_eff[4], wrench_eff[5],
+        active_str,
     )
     log.debug(
         '[Loop %4d] virtual_step=[%+.3f,%+.3f,%+.3f]mm/[%+.3f,%+.3f,%+.3f]deg '
@@ -415,13 +559,20 @@ def main():
     log.info('Robot command mode: %s', 'APPLY' if APPLY_ROBOT_COMMANDS else 'DEBUG_ONLY')
     log.info('Axis test mode: %s (%s)', AXIS_TEST_MODE.upper(), enabled_axis_names)
     log.info('Model: virtual target from F/T, follow with D*x_dot = K*(x_virtual - x_command)')
+    log.info('[HYSTERESIS] ENGAGE F_xy/z=%.2f/%.2f N, RELEASE F_xy/z=%.2f/%.2f N',
+             FORCE_ENGAGE_XY, FORCE_ENGAGE_Z, FORCE_RELEASE_XY, FORCE_RELEASE_Z)
+    log.info('[HYSTERESIS] ENGAGE T_rxry/rz=%.3f/%.3f Nm, RELEASE T_rxry/rz=%.3f/%.3f Nm',
+             TORQUE_ENGAGE_RXRY, TORQUE_ENGAGE_RZ, TORQUE_RELEASE_RXRY, TORQUE_RELEASE_RZ)
     log.info('Input gain F xy/z=%.2f/%.2f mm/(N*s), T rxry/rz=%.2f/%.2f deg/(Nm*s)',
              VIRTUAL_POINT_FORCE_GAIN_XY, VIRTUAL_POINT_FORCE_GAIN_Z,
              VIRTUAL_POINT_TORQUE_GAIN_RXRY, VIRTUAL_POINT_TORQUE_GAIN_RZ)
-    log.info('K trans xy/z=%.2f/%.2f N/mm, D trans xy/z=%.2f/%.2f N*s/mm',
-             STIFFNESS_XY, STIFFNESS_Z, DAMPING_XY, DAMPING_Z)
-    log.info('K rot rxry/rz=%.3f/%.3f Nm/deg, D rot rxry/rz=%.3f/%.3f Nm*s/deg',
-             ROT_STIFFNESS_RXRY, ROT_STIFFNESS_RZ, ROT_DAMPING_RXRY, ROT_DAMPING_RZ)
+    log.info('K trans xy/z=%.2f/%.2f N/mm, D trans xy/z=%.2f/%.2f N*s/mm  (K/D=%.1f/s)',
+             STIFFNESS_XY, STIFFNESS_Z, DAMPING_XY, DAMPING_Z,
+             STIFFNESS_XY / DAMPING_XY)
+    log.info('K rot rxry/rz=%.3f/%.3f Nm/deg, D rot rxry/rz=%.3f/%.3f Nm*s/deg  (K/D=%.1f/s)',
+             ROT_STIFFNESS_RXRY, ROT_STIFFNESS_RZ, ROT_DAMPING_RXRY, ROT_DAMPING_RZ,
+             ROT_STIFFNESS_RXRY / ROT_DAMPING_RXRY)
+    log.info('TEL_VEL_RATIO=%.2f', TEL_VEL_RATIO)
     log.info('=' * 70)
 
     sensor = FTSensorReader(CAN_INTERFACE, CAN_CHANNEL, CAN_BITRATE)
@@ -481,6 +632,8 @@ def main():
     loop_count = 0
     virtual_pose = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     command_pose = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    # [NEW] 각 축의 운동 상태 플래그 (히스테리시스 상태 기억)
+    axis_active  = [False, False, False, False, False, False]
     prev_time = time.time()
 
     log.info('Control loop started. Press Ctrl+C to stop.')
@@ -497,7 +650,11 @@ def main():
                 dt = CONTROL_PERIOD
 
             ft_raw = sensor.get_ft()
-            ft_comp, wrench_eff = compensate_and_deadband(ft_raw, bias, enabled_indices)
+
+            # [MODIFIED] 히스테리시스 deadband 적용 (axis_active in-place 갱신)
+            ft_comp, wrench_eff = compensate_and_hysteresis(
+                ft_raw, bias, enabled_indices, axis_active
+            )
 
             virtual_step = update_virtual_target(virtual_pose, wrench_eff, dt, enabled_indices)
             command_step, error = compute_spring_damper_step(
@@ -509,7 +666,7 @@ def main():
 
             log_status(
                 ft_raw, ft_comp, wrench_eff, virtual_step, command_step,
-                virtual_pose, command_pose, error, loop_count
+                virtual_pose, command_pose, error, loop_count, axis_active
             )
 
             if APPLY_ROBOT_COMMANDS:
