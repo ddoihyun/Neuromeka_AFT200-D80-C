@@ -19,16 +19,25 @@
 #     If robot feedback pose is needed later, replace command_pose with the
 #     measured TCP-relative pose in the spring-damper error calculation.
 #
-# [MODIFIED] Changes from original:
-#   - 2-Stage Hysteresis Threshold:
-#       * ENGAGE threshold (start): larger force required to begin motion
-#       * RELEASE threshold (sustain): smaller force enough to keep moving
-#       * Per-axis motion state tracked via 'axis_active' flags
-#   - Improved responsiveness:
-#       * VIRTUAL_POINT_FORCE_GAIN_XY/Z raised (faster virtual target movement)
-#       * K/D ratio raised (robot follows virtual target faster)
-#       * MAX_COMMAND_STEP_MM/DEG raised (larger per-loop movement allowed)
-#       * TEL_VEL_RATIO raised (robot executes commands faster)
+# [MODIFIED v2] Changes from v1 (hysteresis + smoothing):
+#
+#   핵심 문제: 기존 히스테리시스가 on/off 스위치처럼 동작해 움직임이 뚝뚝 끊김.
+#
+#   변경사항:
+#   1. [Smooth Hysteresis] hysteresis_deadband 출력을 연속값으로 변경
+#      - 정지 상태: |force| >= ENGAGE 가 되어야 운동 시작 (2단계 구조 유지)
+#      - 운동 상태: |force| >= RELEASE 면 운동 유지 (작은 힘으로 유지)
+#      - 출력값: threshold를 뺀 연속값 (0이 아닌 부드러운 시작)
+#        예) engage=2N, force=2.5N → eff = 0.5N (갑자기 2.5N이 아닌 0.5N)
+#      → 상태 전환 시 출력 불연속성 제거
+#
+#   2. [Wrench LPF] 센서 노이즈로 인한 threshold 경계 왔다갔다 방지
+#      - wrench_eff에 1차 저역통과필터 적용
+#      - alpha=WRENCH_LPF_ALPHA: 값이 클수록 현재값 반영↑ (반응 빠름), 작을수록 평탄
+#
+#   3. [Command Step LPF] MoveTeleL 명령 자체를 부드럽게
+#      - command_step에 1차 저역통과필터 적용
+#      - 갑작스런 step 변화로 인한 로봇 저크(jerk) 감소
 #
 # ***********************************************************************
 
@@ -85,96 +94,88 @@ BIAS_SAMPLE_COUNT = 200
 BIAS_SAMPLE_DELAY = 0.005
 
 # ---------------------------------------------------------------------------
-# [MODIFIED] 2-Stage Hysteresis Thresholds
+# [유지] 2-Stage Hysteresis Thresholds
 #
 # ENGAGE  (start threshold): 정지 상태에서 움직임을 시작하려면 이 값 이상의 힘 필요
 # RELEASE (sustain threshold): 한 번 움직이기 시작한 뒤 운동을 유지하기 위한 최소 힘
 #
-# 동작 원리:
-#   axis_active[i] == False (정지):  |force| >= ENGAGE  => axis_active = True, 운동 시작
+# [v2 변경] 출력 방식 변경: on/off → 연속값
+#   - 기존: active이면 원래 force 값 그대로 출력 → 상태 전환 시 갑자기 큰 값 출력
+#   - 변경: active이면 (force - threshold)를 출력 → 전환 직후 0에 가까운 값부터 시작
+#
+# 동작 원리 (구조는 동일):
+#   axis_active[i] == False (정지):  |force| >= ENGAGE  => axis_active = True
+#                                    출력 = force - ENGAGE  (ENGAGE 이상분만)
 #   axis_active[i] == True  (운동):  |force| >= RELEASE => 운동 유지
-#                                    |force| <  RELEASE => axis_active = False, 정지
+#                                    출력 = force - RELEASE (RELEASE 이상분만)
+#                                    |force| <  RELEASE => axis_active = False, 출력 = 0
 #
 # 튜닝 가이드:
 #   - ENGAGE를 낮추면 작은 힘으로도 쉽게 시작됨 (민감도 ↑, 의도치 않은 움직임 위험 ↑)
 #   - ENGAGE를 높이면 확실한 의도가 있어야만 시작됨 (안정성 ↑, 반응성 ↓)
 #   - RELEASE를 ENGAGE 대비 40~60% 수준으로 유지하면 히스테리시스 효과가 자연스러움
 # ---------------------------------------------------------------------------
-FORCE_ENGAGE_XY   = 1.0    # N  — 정지 → 운동 전환에 필요한 힘 (원래 FORCE_THRESHOLD_XY=0.5)
-FORCE_RELEASE_XY  = 0.8    # N  — 운동 → 정지 전환 경계 (ENGAGE의 50%)
+FORCE_ENGAGE_XY   = 2.0    # N  — 정지 → 운동 전환에 필요한 힘
+FORCE_RELEASE_XY  = 1.0    # N  — 운동 → 정지 전환 경계 (ENGAGE의 50%)
 
-FORCE_ENGAGE_Z    = 1.0    # N
-FORCE_RELEASE_Z   = 0.8    # N
+FORCE_ENGAGE_Z    = 2.0    # N
+FORCE_RELEASE_Z   = 1.0    # N
 
-TORQUE_ENGAGE_RXRY   = 0.15  # Nm
-TORQUE_RELEASE_RXRY  = 0.07  # Nm
+TORQUE_ENGAGE_RXRY   = 0.20  # Nm
+TORQUE_RELEASE_RXRY  = 0.10  # Nm
 
-TORQUE_ENGAGE_RZ     = 0.15  # Nm
-TORQUE_RELEASE_RZ    = 0.07  # Nm
-
-# ---------------------------------------------------------------------------
-# [MODIFIED] Virtual target gain — 힘 입력이 virtual target을 얼마나 빠르게 이동시키는가
-#
-# 원래 값: XY=4.0, Z=3.0, RXRY=5.0, RZ=5.0
-#
-# 튜닝 가이드:
-#   - 값을 높일수록 같은 힘 입력에 대해 virtual target이 더 많이 이동 → 로봇이 더 크게 반응
-#   - 너무 높으면 MAX_VIRTUAL_STEP 클램프에 항상 걸려 실질적 효과 없음
-#   - MAX_VIRTUAL_STEP_MM = gain * max_force * dt 가 클램프 이하가 되도록 설정
-#     예) gain=8, max_expected_force=5N, dt=0.02 → 0.8mm/loop < 5mm ✓
-# ---------------------------------------------------------------------------
-VIRTUAL_POINT_FORCE_GAIN_XY    = 8.0   # mm / (N*s)   [원래: 4.0]
-VIRTUAL_POINT_FORCE_GAIN_Z     = 6.0   # mm / (N*s)   [원래: 3.0]
-VIRTUAL_POINT_TORQUE_GAIN_RXRY = 10.0  # deg / (Nm*s) [원래: 5.0]
-VIRTUAL_POINT_TORQUE_GAIN_RZ   = 10.0  # deg / (Nm*s) [원래: 5.0]
+TORQUE_ENGAGE_RZ     = 0.20  # Nm
+TORQUE_RELEASE_RZ    = 0.10  # Nm
 
 # ---------------------------------------------------------------------------
-# [MODIFIED] Spring-damper follow dynamics: D * x_dot = K * error
+# [NEW v2] Low-Pass Filter coefficients
 #
-# 실질 추종 이득 = K / D (단위: 1/s)
+# 1차 LPF: y[n] = alpha * x[n] + (1 - alpha) * y[n-1]
 #
-# 원래:  K=2.0, D=0.25  => K/D = 8  /s
-# 변경:  K=4.0, D=0.20  => K/D = 20 /s  (약 2.5배 빠른 추종)
+# WRENCH_LPF_ALPHA: wrench_eff에 적용 (threshold 이후 유효 힘값)
+#   - 센서 노이즈가 threshold 경계를 왔다갔다해서 생기는 미세한 on/off 진동 제거
+#   - 0.3~0.6 권장: 너무 낮으면 반응 지연, 너무 높으면 필터 효과 없음
 #
-# 튜닝 가이드:
-#   - K/D 비율이 높을수록 virtual target을 빠르게 추종 (반응성 ↑)
-#   - D를 너무 낮추면 오버슈트 발생 가능
-#   - 권장: K/D = 10~25 범위에서 테스트
-#
-# command_step per loop = (K/D) * error * dt
-#   예) K/D=20, error=2mm, dt=0.02s → step=0.8mm/loop
+# CMD_LPF_ALPHA: command_step에 적용 (MoveTeleL로 보내는 명령)
+#   - 갑작스런 명령 변화로 인한 로봇 저크(jerk) 감소
+#   - 0.4~0.7 권장: 너무 낮으면 로봇 반응이 느려짐
 # ---------------------------------------------------------------------------
-STIFFNESS_XY  = 4.0   # N/mm     [원래: 2.0]
-STIFFNESS_Z   = 4.0   # N/mm     [원래: 2.0]
-DAMPING_XY    = 0.20  # N*s/mm   [원래: 0.25]  => K/D = 20/s
-DAMPING_Z     = 0.20  # N*s/mm   [원래: 0.25]  => K/D = 20/s
-
-ROT_STIFFNESS_RXRY = 1.0   # Nm/deg     [원래: 0.5]
-ROT_STIFFNESS_RZ   = 1.0   # Nm/deg     [원래: 0.5]
-ROT_DAMPING_RXRY   = 0.10  # Nm*s/deg   [원래: 0.25] => K/D = 10/s
-ROT_DAMPING_RZ     = 0.10  # Nm*s/deg   [원래: 0.25] => K/D = 10/s
+WRENCH_LPF_ALPHA = 0.4   # 0~1 (클수록 현재값 반영 ↑, 작을수록 평탄)
+CMD_LPF_ALPHA    = 0.5   # 0~1
 
 # ---------------------------------------------------------------------------
-# [MODIFIED] Safety clamps per control loop
-#
-# MAX_COMMAND_STEP: 한 루프당 최대 이동량
-# 원래 5.0mm / 1.0deg → 유지 (충분히 크므로 bottleneck 아님)
-# 반응성이 여전히 부족하면 이 값을 먼저 확인할 것
+# [유지] Virtual target gain — 힘 입력이 virtual target을 얼마나 빠르게 이동시키는가
+# ---------------------------------------------------------------------------
+VIRTUAL_POINT_FORCE_GAIN_XY    = 8.0   # mm / (N*s)
+VIRTUAL_POINT_FORCE_GAIN_Z     = 6.0   # mm / (N*s)
+VIRTUAL_POINT_TORQUE_GAIN_RXRY = 10.0  # deg / (Nm*s)
+VIRTUAL_POINT_TORQUE_GAIN_RZ   = 10.0  # deg / (Nm*s)
+
+# ---------------------------------------------------------------------------
+# [유지] Spring-damper follow dynamics: D * x_dot = K * error
+# ---------------------------------------------------------------------------
+STIFFNESS_XY  = 4.0   # N/mm
+STIFFNESS_Z   = 4.0   # N/mm
+DAMPING_XY    = 0.20  # N*s/mm   => K/D = 20/s
+DAMPING_Z     = 0.20  # N*s/mm   => K/D = 20/s
+
+ROT_STIFFNESS_RXRY = 1.0   # Nm/deg
+ROT_STIFFNESS_RZ   = 1.0   # Nm/deg
+ROT_DAMPING_RXRY   = 0.10  # Nm*s/deg  => K/D = 10/s
+ROT_DAMPING_RZ     = 0.10  # Nm*s/deg  => K/D = 10/s
+
+# ---------------------------------------------------------------------------
+# [유지] Safety clamps per control loop
 # ---------------------------------------------------------------------------
 MAX_VIRTUAL_STEP_MM  = 5.0
-MAX_VIRTUAL_STEP_DEG = 2.0   # [원래: 1.0] — 회전 virtual step 허용 범위 확대
+MAX_VIRTUAL_STEP_DEG = 2.0
 MAX_COMMAND_STEP_MM  = 5.0
-MAX_COMMAND_STEP_DEG = 2.0   # [원래: 1.0] — 회전 command step 허용 범위 확대
+MAX_COMMAND_STEP_DEG = 2.0
 
 # ---------------------------------------------------------------------------
-# [MODIFIED] Teleop velocity ratio
-#
-# 원래: 0.5 → 변경: 0.8
-# 로봇이 MoveTeleL 명령을 실행할 때의 최대 속도 비율 (0~1)
-# 높일수록 실제 로봇 이동 속도 증가 → 체감 반응성 직접적으로 향상
-# 단, 너무 높으면 안전 제한에 걸릴 수 있음; 0.7~0.9 범위에서 테스트 권장
+# [유지] Teleop velocity ratio
 # ---------------------------------------------------------------------------
-TEL_VEL_RATIO = 0.8   # [원래: 0.5]
+TEL_VEL_RATIO = 0.8
 TEL_ACC_RATIO = 1.0
 
 CONTROL_PERIOD = 0.02
@@ -324,12 +325,20 @@ def measure_bias(sensor, n_samples=BIAS_SAMPLE_COUNT, delay=BIAS_SAMPLE_DELAY):
 
 
 # ---------------------------------------------------------------------------
-# [NEW] 2-Stage Hysteresis Deadband
+# [MODIFIED v2] 2-Stage Smooth Hysteresis Deadband
+#
+# v1과 달리 출력이 연속값 (on/off 아님):
+#   - 정지→운동 전환 시: eff = force - ENGAGE   (갑자기 큰 값이 아니라 0에서 시작)
+#   - 운동 유지 시:      eff = force - RELEASE  (RELEASE 이상분만 유효 출력)
+#   - 운동→정지 전환 시: eff = 0.0
+#
+# 이렇게 하면 상태 전환 순간에 출력이 연속적으로 이어지며,
+# 2단계 threshold 구조(정지: 큰 힘 필요 / 운동 유지: 작은 힘으로 충분)는 그대로 유지됨.
 # ---------------------------------------------------------------------------
 
 def hysteresis_deadband(val, engage, release, is_active):
     """
-    2단계 히스테리시스 deadband.
+    2단계 히스테리시스 deadband (연속값 출력 버전).
 
     Parameters
     ----------
@@ -341,24 +350,30 @@ def hysteresis_deadband(val, engage, release, is_active):
     Returns
     -------
     (effective_value, new_is_active)
-      effective_value : deadband 처리 후 실제 사용할 값
+      effective_value : deadband 처리 후 연속 출력값
+                        정지→운동: val - engage  (전환 직후 0 근처에서 연속 시작)
+                        운동 유지: val - release (release 이상분만)
+                        정지:      0.0
       new_is_active   : 갱신된 운동 상태 플래그
     """
     abs_val = abs(val)
+    sign = 1.0 if val >= 0.0 else -1.0
 
     if not is_active:
-        # 정지 상태: ENGAGE 임계값 이상이어야 운동 시작
+        # 정지 상태: ENGAGE 이상이어야 운동 시작
         if abs_val >= engage:
             new_active = True
-            eff = (val - engage) if val > 0 else (val + engage)
+            # 전환 직후 갑자기 큰 값 대신 (abs_val - engage) 만큼만 출력
+            eff = sign * (abs_val - engage)
         else:
             new_active = False
             eff = 0.0
     else:
-        # 운동 상태: RELEASE 임계값 미만이면 정지로 전환
+        # 운동 상태: RELEASE 이상이면 운동 유지
         if abs_val >= release:
             new_active = True
-            eff = (val - release) if val > 0 else (val + release)
+            # RELEASE 이상분만 출력 (작은 힘도 연속으로 반영)
+            eff = sign * (abs_val - release)
         else:
             new_active = False
             eff = 0.0
@@ -380,7 +395,7 @@ def compensate_and_hysteresis(ft_raw, bias, enabled_indices, axis_active):
     Returns
     -------
     ft_comp   : bias 보정된 원시값 [6]
-    wrench_eff: 히스테리시스 적용 후 유효 wrench [6]
+    wrench_eff: 히스테리시스 적용 후 유효 wrench [6] (연속값)
     """
     ft_comp = [ft_raw[i] - bias[i] for i in range(6)]
 
@@ -407,6 +422,28 @@ def compensate_and_hysteresis(ft_raw, bias, enabled_indices, axis_active):
         wrench_eff[i] = eff
 
     return ft_comp, wrench_eff
+
+
+# ---------------------------------------------------------------------------
+# [NEW v2] Low-Pass Filter
+# ---------------------------------------------------------------------------
+
+def apply_lpf(current, previous, alpha):
+    # type: (List[float], List[float], float) -> List[float]
+    """
+    1차 저역통과필터: y[n] = alpha * x[n] + (1 - alpha) * y[n-1]
+
+    Parameters
+    ----------
+    current  : 현재 입력값 리스트
+    previous : 이전 필터 출력값 리스트 (in-place 갱신 아님; 호출 측에서 저장)
+    alpha    : 필터 계수 (0~1). 클수록 현재값 반영 ↑
+
+    Returns
+    -------
+    filtered : 필터링된 출력값 리스트
+    """
+    return [alpha * current[i] + (1.0 - alpha) * previous[i] for i in range(len(current))]
 
 
 def update_virtual_target(virtual_pose, wrench_eff, dt, enabled_indices):
@@ -482,21 +519,20 @@ def check_robot_connection(indy):
         return False
 
 
-def log_status(ft_raw, ft_comp, wrench_eff, virtual_step, command_step,
-               virtual_pose, command_pose, error, loop_count, axis_active):
+def log_status(ft_raw, ft_comp, wrench_eff, wrench_filtered, virtual_step, command_step,
+               command_step_filtered, virtual_pose, command_pose, error, loop_count, axis_active):
     if loop_count % 10 != 0:
         return
 
     moving_axes = []
     for i, name in enumerate(AXIS_NAMES):
-        if abs(command_step[i]) > 1e-4:
-            direction = '+' if command_step[i] > 0 else '-'
+        if abs(command_step_filtered[i]) > 1e-4:
+            direction = '+' if command_step_filtered[i] > 0 else '-'
             moving_axes.append('{}{} {:.3f}{}'.format(
-                direction, name, abs(command_step[i]), AXIS_UNITS[i]
+                direction, name, abs(command_step_filtered[i]), AXIS_UNITS[i]
             ))
     move_str = ', '.join(moving_axes) if moving_axes else 'stop'
 
-    # [MODIFIED] axis_active 상태 출력 추가
     active_str = ''.join('A' if axis_active[i] else '_' for i in range(6))
 
     log.debug(
@@ -507,12 +543,15 @@ def log_status(ft_raw, ft_comp, wrench_eff, virtual_step, command_step,
     )
     log.debug(
         '[Loop %4d] COMP F=[%+6.2f,%+6.2f,%+6.2f]N COMP T=[%+6.3f,%+6.3f,%+6.3f]Nm '
-        'EFF=[%+6.2f,%+6.2f,%+6.2f,%+6.3f,%+6.3f,%+6.3f] ACTIVE=%s',
+        'EFF=[%+6.2f,%+6.2f,%+6.2f,%+6.3f,%+6.3f,%+6.3f] '
+        'EFF_LPF=[%+6.2f,%+6.2f,%+6.2f,%+6.3f,%+6.3f,%+6.3f] ACTIVE=%s',
         loop_count,
         ft_comp[0], ft_comp[1], ft_comp[2],
         ft_comp[3], ft_comp[4], ft_comp[5],
         wrench_eff[0], wrench_eff[1], wrench_eff[2],
         wrench_eff[3], wrench_eff[4], wrench_eff[5],
+        wrench_filtered[0], wrench_filtered[1], wrench_filtered[2],
+        wrench_filtered[3], wrench_filtered[4], wrench_filtered[5],
         active_str,
     )
     log.debug(
@@ -525,10 +564,13 @@ def log_status(ft_raw, ft_comp, wrench_eff, virtual_step, command_step,
     )
     log.debug(
         '[Loop %4d] cmd_step=[%+.3f,%+.3f,%+.3f]mm/[%+.3f,%+.3f,%+.3f]deg '
+        'cmd_step_lpf=[%+.3f,%+.3f,%+.3f]mm/[%+.3f,%+.3f,%+.3f]deg '
         'cmd_pose=[%+.2f,%+.2f,%+.2f]mm/[%+.2f,%+.2f,%+.2f]deg axes=%s',
         loop_count,
         command_step[0], command_step[1], command_step[2],
         command_step[3], command_step[4], command_step[5],
+        command_step_filtered[0], command_step_filtered[1], command_step_filtered[2],
+        command_step_filtered[3], command_step_filtered[4], command_step_filtered[5],
         command_pose[0], command_pose[1], command_pose[2],
         command_pose[3], command_pose[4], command_pose[5],
         move_str,
@@ -555,7 +597,7 @@ def main():
     enabled_axis_names = ', '.join(AXIS_NAMES[i] for i in enabled_indices)
 
     log.info('=' * 70)
-    log.info('6-axis virtual-point admittance controller started')
+    log.info('6-axis virtual-point admittance controller started  [v2: smooth hysteresis + LPF]')
     log.info('Robot command mode: %s', 'APPLY' if APPLY_ROBOT_COMMANDS else 'DEBUG_ONLY')
     log.info('Axis test mode: %s (%s)', AXIS_TEST_MODE.upper(), enabled_axis_names)
     log.info('Model: virtual target from F/T, follow with D*x_dot = K*(x_virtual - x_command)')
@@ -563,6 +605,7 @@ def main():
              FORCE_ENGAGE_XY, FORCE_ENGAGE_Z, FORCE_RELEASE_XY, FORCE_RELEASE_Z)
     log.info('[HYSTERESIS] ENGAGE T_rxry/rz=%.3f/%.3f Nm, RELEASE T_rxry/rz=%.3f/%.3f Nm',
              TORQUE_ENGAGE_RXRY, TORQUE_ENGAGE_RZ, TORQUE_RELEASE_RXRY, TORQUE_RELEASE_RZ)
+    log.info('[LPF] wrench_alpha=%.2f, cmd_step_alpha=%.2f', WRENCH_LPF_ALPHA, CMD_LPF_ALPHA)
     log.info('Input gain F xy/z=%.2f/%.2f mm/(N*s), T rxry/rz=%.2f/%.2f deg/(Nm*s)',
              VIRTUAL_POINT_FORCE_GAIN_XY, VIRTUAL_POINT_FORCE_GAIN_Z,
              VIRTUAL_POINT_TORQUE_GAIN_RXRY, VIRTUAL_POINT_TORQUE_GAIN_RZ)
@@ -630,10 +673,14 @@ def main():
             return
 
     loop_count = 0
-    virtual_pose = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    command_pose = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    # [NEW] 각 축의 운동 상태 플래그 (히스테리시스 상태 기억)
-    axis_active  = [False, False, False, False, False, False]
+    virtual_pose  = [0.0] * 6
+    command_pose  = [0.0] * 6
+    axis_active   = [False] * 6
+
+    # [NEW v2] LPF 이전 출력값 초기화
+    wrench_filtered      = [0.0] * 6   # wrench_eff LPF 상태
+    cmd_step_filtered    = [0.0] * 6   # command_step LPF 상태
+
     prev_time = time.time()
 
     log.info('Control loop started. Press Ctrl+C to stop.')
@@ -651,21 +698,32 @@ def main():
 
             ft_raw = sensor.get_ft()
 
-            # [MODIFIED] 히스테리시스 deadband 적용 (axis_active in-place 갱신)
+            # 히스테리시스 deadband 적용 (연속값 출력)
             ft_comp, wrench_eff = compensate_and_hysteresis(
                 ft_raw, bias, enabled_indices, axis_active
             )
 
-            virtual_step = update_virtual_target(virtual_pose, wrench_eff, dt, enabled_indices)
+            # [NEW v2] wrench LPF: 센서 노이즈로 인한 경계 진동 방지
+            wrench_filtered = apply_lpf(wrench_eff, wrench_filtered, WRENCH_LPF_ALPHA)
+
+            # 필터링된 wrench로 virtual target 갱신
+            virtual_step = update_virtual_target(virtual_pose, wrench_filtered, dt, enabled_indices)
+
+            # spring-damper로 command step 계산
             command_step, error = compute_spring_damper_step(
                 virtual_pose, command_pose, dt, enabled_indices
             )
 
+            # [NEW v2] command step LPF: 명령 자체의 저크 감소
+            cmd_step_filtered = apply_lpf(command_step, cmd_step_filtered, CMD_LPF_ALPHA)
+
+            # 필터링된 command step으로 pose 누적
             for i in range(6):
-                command_pose[i] += command_step[i]
+                command_pose[i] += cmd_step_filtered[i]
 
             log_status(
-                ft_raw, ft_comp, wrench_eff, virtual_step, command_step,
+                ft_raw, ft_comp, wrench_eff, wrench_filtered,
+                virtual_step, command_step, cmd_step_filtered,
                 virtual_pose, command_pose, error, loop_count, axis_active
             )
 
