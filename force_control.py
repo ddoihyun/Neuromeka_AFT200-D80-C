@@ -69,7 +69,7 @@ CAN_BITRATE = 1_000_000
 CAN_ID_FORCE = 0x001
 CAN_ID_TORQUE = 0x002
 
-ROBOT_IP = '192.168.0.137'
+ROBOT_IP = '192.168.0.99'
 ROBOT_INDEX = 0
 
 # Switch this single value to move between dry-run debugging and real control.
@@ -192,16 +192,42 @@ AXIS_MODE_TO_INDICES = {
 
 
 # ===================================================================
-# Logging
+# Logging — compact columnar format
 # ===================================================================
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='[%(asctime)s] %(levelname)s %(message)s',
-    datefmt='%H:%M:%S',
-    handlers=[logging.StreamHandler(sys.stdout)],
-)
-log = logging.getLogger('VirtualAdmittance')
+class _CompactFormatter(logging.Formatter):
+    """한 눈에 읽히는 고정폭 포맷.
+
+    [HH:MM:SS.mmm] LEVEL  message
+    레벨을 5자 고정폭으로 정렬하여 DEBUG/INFO/WARNING/ERROR 모두 열이 맞음.
+    """
+    LEVEL_ABBREV = {
+        logging.DEBUG:    'DEBUG',
+        logging.INFO:     'INFO ',
+        logging.WARNING:  'WARN ',
+        logging.ERROR:    'ERROR',
+        logging.CRITICAL: 'CRIT ',
+    }
+
+    def format(self, record):
+        ts = self.formatTime(record, '%H:%M:%S')
+        ms = int(record.msecs)
+        lvl = self.LEVEL_ABBREV.get(record.levelno, record.levelname[:5])
+        msg = record.getMessage()
+        return f'[{ts}.{ms:03d}] {lvl}  {msg}'
+
+
+def _build_logger():
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(_CompactFormatter())
+    logger = logging.getLogger('VirtualAdmittance')
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(handler)
+    logger.propagate = False
+    return logger
+
+
+log = _build_logger()
 
 
 # ===================================================================
@@ -520,7 +546,8 @@ def check_robot_connection(indy):
 
 
 def log_status(ft_raw, ft_comp, wrench_eff, wrench_filtered, virtual_step, command_step,
-               command_step_filtered, virtual_pose, command_pose, error, loop_count, axis_active):
+               command_step_filtered, virtual_pose, command_pose, error, loop_count, axis_active,
+               joint_q=None):
     if loop_count % 10 != 0:
         return
 
@@ -581,6 +608,9 @@ def log_status(ft_raw, ft_comp, wrench_eff, wrench_filtered, virtual_step, comma
         virtual_pose[0], virtual_pose[1], virtual_pose[2],
         virtual_pose[3], virtual_pose[4], virtual_pose[5],
     )
+    if joint_q is not None:
+        q_str = ', '.join('%+8.4f' % v for v in joint_q)
+        log.debug('[Loop %4d] JOINT q=[%s] deg', loop_count, q_str)
 
 
 # ===================================================================
@@ -648,6 +678,7 @@ def main():
     else:
         log.warning('DEBUG_ONLY mode: robot connection, teleop, and MoveTeleL commands are disabled.')
 
+    time.sleep(2)
     input('\nKeep robot and F/T sensor still, then press Enter to measure bias... ')
     bias = measure_bias(sensor)
 
@@ -698,6 +729,14 @@ def main():
 
             ft_raw = sensor.get_ft()
 
+            # 관절 각도 읽기 (로봇 연결 시에만)
+            joint_q = None
+            if APPLY_ROBOT_COMMANDS and indy is not None:
+                try:
+                    joint_q = indy.get_control_state()['q']
+                except Exception:
+                    pass
+
             # 히스테리시스 deadband 적용 (연속값 출력)
             ft_comp, wrench_eff = compensate_and_hysteresis(
                 ft_raw, bias, enabled_indices, axis_active
@@ -724,7 +763,8 @@ def main():
             log_status(
                 ft_raw, ft_comp, wrench_eff, wrench_filtered,
                 virtual_step, command_step, cmd_step_filtered,
-                virtual_pose, command_pose, error, loop_count, axis_active
+                virtual_pose, command_pose, error, loop_count, axis_active,
+                joint_q=joint_q,
             )
 
             if APPLY_ROBOT_COMMANDS:
