@@ -39,6 +39,43 @@
 #      - command_step에 1차 저역통과필터 적용
 #      - 갑작스런 step 변화로 인한 로봇 저크(jerk) 감소
 #
+# [MODIFIED v4] Changes from v3 (max force/torque threshold):
+#
+#   핵심 기능: bias 보정 후 외력이 최대 허용값을 초과하면 해당 루프의 명령을 무시.
+#
+#   동작 원리:
+#   - bias 보정 완료된 ft_comp 기준으로 판단 (실제 외력 기준)
+#   - F_xy, F_z, T_rxry, T_rz 각 그룹별로 독립 체크
+#   - 어느 축이든 초과하면 → 해당 루프 wrench 전체 0 처리 + axis_active 전부 리셋
+#   - WARN 로그 출력 (초과 시에만)
+#   - virtual_pose anchor(v3)와 연계되어 초과 루프에서 추격 오차도 flush됨
+#
+#   튜닝 가이드:
+#   - 너무 낮으면 정상적인 강한 조작도 무시됨 → 조작 의도 반영이 안 됨
+#   - 너무 높으면 충돌/오작동 보호 효과가 없음
+#   - 일반적으로 ENGAGE의 5~10배 수준이 적절 (F: 2N engage → 15~20N max)
+#
+# [MODIFIED v3] Changes from v2 (virtual_pose anchor + tuning):
+#
+#   핵심 문제: 손을 떼도 로봇이 계속 움직이며, 관절 90도 근처에서 특히 심하게 튐.
+#
+#   원인 분석:
+#   - 힘이 가해지는 동안 virtual_pose가 command_pose보다 앞서 나감
+#   - 손을 떼면 wrench=0이 되어 virtual_pose는 멈추지만,
+#     이미 쌓인 error(virtual - command)를 spring-damper가 계속 추격
+#   - 90도 근처 특이점에서 동일 task-space 명령에 관절이 훨씬 크게 반응
+#
+#   변경사항:
+#   1. [Virtual Pose Anchor] 모든 축이 비활성(axis_active 전부 False)이면
+#      virtual_pose를 command_pose로 리셋하여 잔류 오차(error) 제거
+#      → 손을 떼는 즉시 추격 동작 중단
+#
+#   2. [Damping 강화] DAMPING_XY: 0.20 → 0.30 (K/D: 20 → ~13/s)
+#      → spring-damper 추격 속도를 완만하게 해 튐 감소
+#
+#   3. [Command Step 클램프 강화] MAX_COMMAND_STEP_MM: 5.0 → 2.0 mm
+#      → 특이점 근처에서 한 루프당 최대 이동량 제한
+#
 # ***********************************************************************
 
 from __future__ import annotations
@@ -128,6 +165,22 @@ TORQUE_ENGAGE_RZ     = 0.20  # Nm
 TORQUE_RELEASE_RZ    = 0.10  # Nm
 
 # ---------------------------------------------------------------------------
+# [NEW v4] Maximum Force/Torque Thresholds (초과 시 해당 루프 명령 무시)
+#
+# bias 보정 후 외력(ft_comp) 기준으로 판단.
+# 어느 축이든 해당 그룹의 max를 초과하면 → wrench 전체 0 + axis_active 리셋.
+#
+# 튜닝 가이드:
+#   - ENGAGE의 5~10배 수준 권장
+#   - 실제 작업 최대 조작력 + 충분한 여유 (예: 최대 조작 5N → MAX 15~20N)
+#   - 너무 낮으면 정상 조작이 무시됨, 너무 높으면 보호 효과 없음
+# ---------------------------------------------------------------------------
+FORCE_MAX_XY  = 20.0   # N  — Fx 또는 Fy 초과 시 무시
+FORCE_MAX_Z   = 20.0   # N  — Fz 초과 시 무시
+TORQUE_MAX_RXRY = 2.0  # Nm — Tx 또는 Ty 초과 시 무시
+TORQUE_MAX_RZ   = 2.0  # Nm — Tz 초과 시 무시
+
+# ---------------------------------------------------------------------------
 # [NEW v2] Low-Pass Filter coefficients
 #
 # 1차 LPF: y[n] = alpha * x[n] + (1 - alpha) * y[n-1]
@@ -156,7 +209,7 @@ VIRTUAL_POINT_TORQUE_GAIN_RZ   = 10.0  # deg / (Nm*s)
 # ---------------------------------------------------------------------------
 STIFFNESS_XY  = 4.0   # N/mm
 STIFFNESS_Z   = 4.0   # N/mm
-DAMPING_XY    = 0.20  # N*s/mm   => K/D = 20/s
+DAMPING_XY    = 0.30  # N*s/mm   => K/D = ~13/s  [v3: 0.20→0.30, 추격 속도 완만하게]
 DAMPING_Z     = 0.20  # N*s/mm   => K/D = 20/s
 
 ROT_STIFFNESS_RXRY = 1.0   # Nm/deg
@@ -169,7 +222,7 @@ ROT_DAMPING_RZ     = 0.10  # Nm*s/deg  => K/D = 10/s
 # ---------------------------------------------------------------------------
 MAX_VIRTUAL_STEP_MM  = 5.0
 MAX_VIRTUAL_STEP_DEG = 2.0
-MAX_COMMAND_STEP_MM  = 5.0
+MAX_COMMAND_STEP_MM  = 2.0   # [v3: 5.0→2.0, 특이점 근처 한 루프당 최대 이동량 제한]
 MAX_COMMAND_STEP_DEG = 2.0
 
 # ---------------------------------------------------------------------------
@@ -451,7 +504,40 @@ def compensate_and_hysteresis(ft_raw, bias, enabled_indices, axis_active):
 
 
 # ---------------------------------------------------------------------------
-# [NEW v2] Low-Pass Filter
+# [NEW v4] Max Force/Torque Guard
+# ---------------------------------------------------------------------------
+
+def check_max_wrench(ft_comp, loop_count):
+    # type: (List[float], int) -> bool
+    """
+    bias 보정된 외력(ft_comp)이 최대 허용값을 초과하는지 검사.
+
+    Parameters
+    ----------
+    ft_comp    : bias 보정된 wrench [Fx, Fy, Fz, Tx, Ty, Tz]
+    loop_count : 로그용 루프 번호
+
+    Returns
+    -------
+    True  : 초과 → 해당 루프 명령 무시해야 함
+    False : 정상 범위
+    """
+    checks = [
+        (0, FORCE_MAX_XY,    'Fx'),
+        (1, FORCE_MAX_XY,    'Fy'),
+        (2, FORCE_MAX_Z,     'Fz'),
+        (3, TORQUE_MAX_RXRY, 'Tx'),
+        (4, TORQUE_MAX_RXRY, 'Ty'),
+        (5, TORQUE_MAX_RZ,   'Tz'),
+    ]
+    for idx, limit, name in checks:
+        if abs(ft_comp[idx]) > limit:
+            log.warning(
+                '[Loop %d] MAX WRENCH EXCEEDED: %s=%.2f (limit=%.2f) — loop skipped',
+                loop_count, name, ft_comp[idx], limit
+            )
+            return True
+    return False
 # ---------------------------------------------------------------------------
 
 def apply_lpf(current, previous, alpha):
@@ -627,7 +713,7 @@ def main():
     enabled_axis_names = ', '.join(AXIS_NAMES[i] for i in enabled_indices)
 
     log.info('=' * 70)
-    log.info('6-axis virtual-point admittance controller started  [v2: smooth hysteresis + LPF]')
+    log.info('6-axis virtual-point admittance controller started  [v4: max wrench guard]')
     log.info('Robot command mode: %s', 'APPLY' if APPLY_ROBOT_COMMANDS else 'DEBUG_ONLY')
     log.info('Axis test mode: %s (%s)', AXIS_TEST_MODE.upper(), enabled_axis_names)
     log.info('Model: virtual target from F/T, follow with D*x_dot = K*(x_virtual - x_command)')
@@ -639,13 +725,17 @@ def main():
     log.info('Input gain F xy/z=%.2f/%.2f mm/(N*s), T rxry/rz=%.2f/%.2f deg/(Nm*s)',
              VIRTUAL_POINT_FORCE_GAIN_XY, VIRTUAL_POINT_FORCE_GAIN_Z,
              VIRTUAL_POINT_TORQUE_GAIN_RXRY, VIRTUAL_POINT_TORQUE_GAIN_RZ)
-    log.info('K trans xy/z=%.2f/%.2f N/mm, D trans xy/z=%.2f/%.2f N*s/mm  (K/D=%.1f/s)',
+    log.info('K trans xy/z=%.2f/%.2f N/mm, D trans xy/z=%.2f/%.2f N*s/mm  (K/D=%.1f/%.1f /s)',
              STIFFNESS_XY, STIFFNESS_Z, DAMPING_XY, DAMPING_Z,
-             STIFFNESS_XY / DAMPING_XY)
+             STIFFNESS_XY / DAMPING_XY, STIFFNESS_Z / DAMPING_Z)
     log.info('K rot rxry/rz=%.3f/%.3f Nm/deg, D rot rxry/rz=%.3f/%.3f Nm*s/deg  (K/D=%.1f/s)',
              ROT_STIFFNESS_RXRY, ROT_STIFFNESS_RZ, ROT_DAMPING_RXRY, ROT_DAMPING_RZ,
              ROT_STIFFNESS_RXRY / ROT_DAMPING_RXRY)
     log.info('TEL_VEL_RATIO=%.2f', TEL_VEL_RATIO)
+    log.info('[v3] Virtual anchor ON (손 뗌 즉시 오차 flush), MAX_CMD_STEP=%.1fmm/%.1fdeg',
+             MAX_COMMAND_STEP_MM, MAX_COMMAND_STEP_DEG)
+    log.info('[v4] MAX WRENCH F_xy/z=%.1f/%.1f N, T_rxry/rz=%.3f/%.3f Nm  (초과 시 루프 무시)',
+             FORCE_MAX_XY, FORCE_MAX_Z, TORQUE_MAX_RXRY, TORQUE_MAX_RZ)
     log.info('=' * 70)
 
     sensor = FTSensorReader(CAN_INTERFACE, CAN_CHANNEL, CAN_BITRATE)
@@ -742,11 +832,32 @@ def main():
                 ft_raw, bias, enabled_indices, axis_active
             )
 
+            # [NEW v4] Max wrench guard: 외력이 최대값 초과 시 해당 루프 명령 무시
+            if check_max_wrench(ft_comp, loop_count):
+                wrench_eff = [0.0] * 6
+                for i in range(6):
+                    axis_active[i] = False
+                    virtual_pose[i] = command_pose[i]  # anchor도 함께 flush
+                loop_count += 1
+                elapsed = time.time() - t_start
+                sleep_time = CONTROL_PERIOD - elapsed
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+                continue
+
             # [NEW v2] wrench LPF: 센서 노이즈로 인한 경계 진동 방지
             wrench_filtered = apply_lpf(wrench_eff, wrench_filtered, WRENCH_LPF_ALPHA)
 
             # 필터링된 wrench로 virtual target 갱신
             virtual_step = update_virtual_target(virtual_pose, wrench_filtered, dt, enabled_indices)
+
+            # [NEW v3] Virtual Pose Anchor:
+            # 모든 축이 비활성 상태(손을 뗀 상태)이면 virtual_pose를 command_pose로
+            # 리셋해서 잔류 오차(virtual - command)가 사라지게 함.
+            # → 손을 떼는 즉시 spring-damper 추격 동작이 멈춤.
+            if not any(axis_active):
+                for i in range(6):
+                    virtual_pose[i] = command_pose[i]
 
             # spring-damper로 command step 계산
             command_step, error = compute_spring_damper_step(
