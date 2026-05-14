@@ -3,7 +3,7 @@
 # Indy 원격 조작을 위한 6축 F/T 가상 포인트 어드미턴스 컨트롤러
 #
 # 제어 개념:
-#   1. 바이어스가 보정된 힘/토크가 가상 목표 포즈(virtual target pose)를 이동시킨다.
+#   1. Bias가 보정된 힘/토크가 가상 목표 포즈(virtual target pose)를 이동시킨다.
 #   2. 로봇 명령 포즈(command pose)는 질량 항이 없는 스프링-댐퍼 관계를 통해
 #      가상 목표를 추종한다:
 #
@@ -70,32 +70,40 @@ AXIS_TEST_MODE = 'X'
 # 제어 파라미터
 # ===================================================================
 
-BIAS_SAMPLE_COUNT = 200       # 바이어스 측정에 사용할 샘플 수
+BIAS_SAMPLE_COUNT = 200       # Bias 측정에 사용할 샘플 수
 BIAS_SAMPLE_DELAY = 0.005     # 샘플 수집 간격 (초)
 
 # 입력 불감대(deadband): 이 범위 내의 값은 노이즈로 간주하여 무시.
-FORCE_THRESHOLD_XY = 0.5       # N  (XY 방향 힘 불감대)
+FORCE_THRESHOLD_X = 0.5        # N  (X 방향 힘 불감대)
+FORCE_THRESHOLD_Y  = 0.5       # N  (Y 방향 힘 불감대)
 FORCE_THRESHOLD_Z = 1.0        # N  (Z 방향 힘 불감대)
-TORQUE_THRESHOLD_RXRY = 0.05   # Nm (Rx, Ry 회전 불감대)
+TORQUE_THRESHOLD_RX = 0.05     # Nm (Rx 회전 불감대)
+TORQUE_THRESHOLD_RY = 0.05     # Nm (Ry 회전 불감대)
 TORQUE_THRESHOLD_RZ = 0.05     # Nm (Rz 회전 불감대)
 
 # 조작자의 렌치(wrench)가 가상 목표를 이동시키는 속도.
 # 로봇이 목표를 추종하기 전의 "핸들 감도" 역할.
-VIRTUAL_POINT_FORCE_GAIN_XY = 2.0       # mm / (N*s)  (XY 방향 힘 → 가상 목표 이동 이득)
+VIRTUAL_POINT_FORCE_GAIN_X = 2.0        # mm / (N*s)  (X 방향 힘 → 가상 목표 이동 이득)
+VIRTUAL_POINT_FORCE_GAIN_Y = 2.0        # mm / (N*s)  (Y 방향 힘 → 가상 목표 이동 이득)
 VIRTUAL_POINT_FORCE_GAIN_Z = 1.5        # mm / (N*s)  (Z 방향 힘 → 가상 목표 이동 이득)
-VIRTUAL_POINT_TORQUE_GAIN_RXRY = 5.0    # deg / (Nm*s) (Rx,Ry 토크 → 가상 목표 회전 이득)
+VIRTUAL_POINT_TORQUE_GAIN_RX = 5.0      # deg / (Nm*s) (Rx 토크 → 가상 목표 회전 이득)
+VIRTUAL_POINT_TORQUE_GAIN_RY = 5.0      # deg / (Nm*s) (Ry 토크 → 가상 목표 회전 이득)
 VIRTUAL_POINT_TORQUE_GAIN_RZ = 5.0      # deg / (Nm*s) (Rz 토크 → 가상 목표 회전 이득)
 
 # 스프링-댐퍼 추종 동역학: D * x_dot = K * error
 # K/D 비율이 클수록 가상 목표를 빠르게 추종함.
-STIFFNESS_XY = 1.0           # N/mm  (XY 방향 병진 강성)
+STIFFNESS_X = 1.0            # N/mm  (X 방향 병진 강성)
+STIFFNESS_Y = 1.0            # N/mm  (Y 방향 병진 강성)
 STIFFNESS_Z = 1.0            # N/mm  (Z 방향 병진 강성)
-DAMPING_XY = 0.25            # N*s/mm (XY 방향 병진 감쇠)
+DAMPING_X = 0.25             # N*s/mm (X 방향 병진 감쇠)
+DAMPING_Y = 0.25             # N*s/mm (Y 방향 병진 감쇠)
 DAMPING_Z = 0.25             # N*s/mm (Z 방향 병진 감쇠)
 
-ROT_STIFFNESS_RXRY = 0.10    # Nm/deg  (Rx,Ry 회전 강성)
+ROT_STIFFNESS_RX = 0.10      # Nm/deg  (Rx 회전 강성)
+ROT_STIFFNESS_RY = 0.10      # Nm/deg  (Ry 회전 강성)
 ROT_STIFFNESS_RZ = 0.10      # Nm/deg  (Rz 회전 강성)
-ROT_DAMPING_RXRY = 0.05      # Nm*s/deg (Rx,Ry 회전 감쇠)
+ROT_DAMPING_RX = 0.05        # Nm*s/deg (Rx 회전 감쇠)
+ROT_DAMPING_RY = 0.05        # Nm*s/deg (Ry 회전 감쇠)
 ROT_DAMPING_RZ = 0.05        # Nm*s/deg (Rz 회전 감쇠)
 
 # 제어 루프 1회당 안전 제한값 (한 루프에서 이 값 이상 이동 불가).
@@ -144,7 +152,7 @@ class FTSensorReader(object):
         self._channel = channel          # CAN 채널(포트)
         self._bitrate = bitrate          # CAN 통신 속도
         self._lock = threading.Lock()    # 센서 데이터 스레드 안전 접근을 위한 뮤텍스
-        # 힘/토크 초기값 (바이어스 보정 전 원시값)
+        # 힘/토크 초기값 (Bias 보정 전 원시값)
         self._Fx = self._Fy = self._Fz = 0.0
         self._Tx = self._Ty = self._Tz = 0.0
         self._running = False            # 수신 스레드 동작 플래그
@@ -244,7 +252,7 @@ def deadband(val, threshold):
 
 
 def get_enabled_axis_indices():
-    """AXIS_TEST_MODE 설정에 따라 활성화할 축 인덱스 튜플을 반환한다."""
+    """AXIS_TEST_MODE 설정에 따라 활성화할 축 인덱스 tuple을 반환한다."""
     mode = AXIS_TEST_MODE.upper()
     if mode not in AXIS_MODE_TO_INDICES:
         raise ValueError("AXIS_TEST_MODE는 'X', 'Y', 'Z', 'ALL' 중 하나여야 합니다")
@@ -253,10 +261,10 @@ def get_enabled_axis_indices():
 
 def measure_bias(sensor, n_samples=BIAS_SAMPLE_COUNT, delay=BIAS_SAMPLE_DELAY):
     """
-    로봇과 센서를 정지 상태로 유지하면서 F/T 바이어스를 측정한다.
-    n_samples개의 샘플 평균을 바이어스로 반환한다.
+    로봇과 센서를 정지 상태로 유지하면서 F/T Bias를 측정한다.
+    n_samples개의 샘플 평균을 Bias로 반환한다.
     """
-    log.info('바이어스 측정 중: %d개 샘플 수집. 로봇과 센서를 정지시키세요.', n_samples)
+    log.info('Bias 측정 중: %d개 샘플 수집. 로봇과 센서를 정지시키세요.', n_samples)
     accum = [0.0] * 6
     for _ in range(n_samples):
         ft = sensor.get_ft()
@@ -265,29 +273,29 @@ def measure_bias(sensor, n_samples=BIAS_SAMPLE_COUNT, delay=BIAS_SAMPLE_DELAY):
         time.sleep(delay)
 
     bias = [accum[j] / n_samples for j in range(6)]
-    log.info('바이어스: F=[%.3f, %.3f, %.3f]N, T=[%.3f, %.3f, %.3f]Nm',
+    log.info('Bias: F=[%.3f, %.3f, %.3f]N, T=[%.3f, %.3f, %.3f]Nm',
              bias[0], bias[1], bias[2], bias[3], bias[4], bias[5])
     return bias
 
 
 def compensate_and_deadband(ft_raw, bias, enabled_indices):
     """
-    원시 F/T 값에서 바이어스를 빼고 불감대를 적용한다.
+    원시 F/T 값에서 Bias를 빼고 불감대를 적용한다.
     비활성화된 축은 유효 렌치값을 0으로 강제한다.
 
     반환:
-        ft_comp     - 바이어스 보정된 값 (불감대 미적용)
+        ft_comp     - Bias 보정된 값 (불감대 미적용)
         wrench_eff  - 실제 제어에 사용할 유효 렌치값 (불감대 + 축 마스크 적용)
     """
-    # 바이어스 보정
+    # Bias 보정
     ft_comp = [ft_raw[i] - bias[i] for i in range(6)]
     # 각 축별 불감대 적용
     wrench_eff = [
-        deadband(ft_comp[0], FORCE_THRESHOLD_XY),
-        deadband(ft_comp[1], FORCE_THRESHOLD_XY),
+        deadband(ft_comp[0], FORCE_THRESHOLD_X),
+        deadband(ft_comp[1], FORCE_THRESHOLD_Y),
         deadband(ft_comp[2], FORCE_THRESHOLD_Z),
-        deadband(ft_comp[3], TORQUE_THRESHOLD_RXRY),
-        deadband(ft_comp[4], TORQUE_THRESHOLD_RXRY),
+        deadband(ft_comp[3], TORQUE_THRESHOLD_RX),
+        deadband(ft_comp[4], TORQUE_THRESHOLD_RY),
         deadband(ft_comp[5], TORQUE_THRESHOLD_RZ),
     ]
     # 비활성화 축은 0으로 마스킹
@@ -309,11 +317,11 @@ def update_virtual_target(virtual_pose, wrench_eff, dt, enabled_indices):
     """
     # 렌치 × 이득 × dt = 이번 루프 가상 목표 이동량
     virtual_step = [
-        wrench_eff[0] * VIRTUAL_POINT_FORCE_GAIN_XY * dt,
-        wrench_eff[1] * VIRTUAL_POINT_FORCE_GAIN_XY * dt,
+        wrench_eff[0] * VIRTUAL_POINT_FORCE_GAIN_X * dt,
+        wrench_eff[1] * VIRTUAL_POINT_FORCE_GAIN_Y * dt,
         wrench_eff[2] * VIRTUAL_POINT_FORCE_GAIN_Z * dt,
-        wrench_eff[3] * VIRTUAL_POINT_TORQUE_GAIN_RXRY * dt,
-        wrench_eff[4] * VIRTUAL_POINT_TORQUE_GAIN_RXRY * dt,
+        wrench_eff[3] * VIRTUAL_POINT_TORQUE_GAIN_RX * dt,
+        wrench_eff[4] * VIRTUAL_POINT_TORQUE_GAIN_RY * dt,
         wrench_eff[5] * VIRTUAL_POINT_TORQUE_GAIN_RZ * dt,
     ]
 
@@ -349,11 +357,11 @@ def compute_spring_damper_step(virtual_pose, command_pose, dt, enabled_indices):
 
     # 각 축의 K/D 비율 (스프링-댐퍼 추종 속도 결정)
     gains = [
-        STIFFNESS_XY / DAMPING_XY,
-        STIFFNESS_XY / DAMPING_XY,
+        STIFFNESS_X / DAMPING_X,
+        STIFFNESS_Y / DAMPING_Y,
         STIFFNESS_Z / DAMPING_Z,
-        ROT_STIFFNESS_RXRY / ROT_DAMPING_RXRY,
-        ROT_STIFFNESS_RXRY / ROT_DAMPING_RXRY,
+        ROT_STIFFNESS_RX / ROT_DAMPING_RX,
+        ROT_STIFFNESS_RY / ROT_DAMPING_RY,
         ROT_STIFFNESS_RZ / ROT_DAMPING_RZ,
     ]
     # 명령 스텝 = (K/D) * error * dt
@@ -479,13 +487,13 @@ def main():
     log.info('로봇 명령 모드: %s', '실제 제어(APPLY)' if APPLY_ROBOT_COMMANDS else '디버그 전용(DEBUG_ONLY)')
     log.info('축 테스트 모드: %s (%s)', AXIS_TEST_MODE.upper(), enabled_axis_names)
     log.info('제어 모델: F/T로 가상 목표 이동 → D*x_dot = K*(x_virtual - x_command)로 추종')
-    log.info('입력 이득 F xy/z=%.2f/%.2f mm/(N*s), T rxry/rz=%.2f/%.2f deg/(Nm*s)',
-             VIRTUAL_POINT_FORCE_GAIN_XY, VIRTUAL_POINT_FORCE_GAIN_Z,
-             VIRTUAL_POINT_TORQUE_GAIN_RXRY, VIRTUAL_POINT_TORQUE_GAIN_RZ)
-    log.info('K 병진 xy/z=%.2f/%.2f N/mm, D 병진 xy/z=%.2f/%.2f N*s/mm',
-             STIFFNESS_XY, STIFFNESS_Z, DAMPING_XY, DAMPING_Z)
-    log.info('K 회전 rxry/rz=%.3f/%.3f Nm/deg, D 회전 rxry/rz=%.3f/%.3f Nm*s/deg',
-             ROT_STIFFNESS_RXRY, ROT_STIFFNESS_RZ, ROT_DAMPING_RXRY, ROT_DAMPING_RZ)
+    log.info('입력 이득 F x/y/z= %.2f/%.2f/%.2f mm/(N*s), T rx/ry/rz= %.2f/%.2f/%.2f deg/(Nm*s)',
+             VIRTUAL_POINT_FORCE_GAIN_X, VIRTUAL_POINT_FORCE_GAIN_Y, VIRTUAL_POINT_FORCE_GAIN_Z,
+             VIRTUAL_POINT_TORQUE_GAIN_RX, VIRTUAL_POINT_TORQUE_GAIN_RY, VIRTUAL_POINT_TORQUE_GAIN_RZ)
+    log.info('K 병진 x/y/z= %.2f/%.2f/%.2f N/mm, D 병진 x/y/z= %.2f/%.2f/%.2f N*s/mm',
+             STIFFNESS_X, STIFFNESS_Y, STIFFNESS_Z, DAMPING_X, DAMPING_Y, DAMPING_Z)
+    log.info('K 회전 rx/ry/rz= %.3f/%.3f/%.3f Nm/deg, D 회전 rx/ry/rz= %.3f/%.3f/%.3f Nm*s/deg',
+             ROT_STIFFNESS_RX, ROT_STIFFNESS_RY, ROT_STIFFNESS_RZ, ROT_DAMPING_RX, ROT_DAMPING_RY, ROT_DAMPING_RZ)
     log.info('=' * 70)
 
     # F/T 센서 초기화 및 수신 시작
@@ -520,8 +528,8 @@ def main():
     else:
         log.warning('DEBUG_ONLY 모드: 로봇 연결, 텔레오퍼레이션, MoveTeleL 명령이 모두 비활성화됩니다.')
 
-    # 바이어스 측정 전 사용자 확인 대기
-    input('\n로봇과 F/T 센서를 정지 상태로 유지한 뒤, Enter를 눌러 바이어스를 측정하세요... ')
+    # Bias 측정 전 사용자 확인 대기
+    input('\n로봇과 F/T 센서를 정지 상태로 유지한 뒤, Enter를 눌러 Bias를 측정하세요... ')
     bias = measure_bias(sensor)
 
     if APPLY_ROBOT_COMMANDS:
@@ -568,7 +576,7 @@ def main():
 
             # 센서에서 원시 F/T 읽기
             ft_raw = sensor.get_ft()
-            # 바이어스 보정 + 불감대 적용
+            # Bias 보정 + 불감대 적용
             ft_comp, wrench_eff = compensate_and_deadband(ft_raw, bias, enabled_indices)
 
             # 가상 목표 포즈 업데이트
