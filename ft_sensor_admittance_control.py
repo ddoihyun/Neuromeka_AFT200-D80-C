@@ -55,7 +55,7 @@ ROBOT_INDEX = 0               # 로봇 인덱스 번호
 # 이 값 하나로 디버깅 모드와 실제 제어 모드를 전환.
 # False: F/T 값, 가상 목표, 계산된 명령 방향만 출력 (로봇 미동작).
 # True:  원격 조작 모드로 진입하여 로봇에 MoveTeleL 명령 전송.
-APPLY_ROBOT_COMMANDS = False
+APPLY_ROBOT_COMMANDS = True
 
 # 안전한 단계별 테스트를 위한 축 고립 설정.
 # 선택 가능한 값:
@@ -63,7 +63,7 @@ APPLY_ROBOT_COMMANDS = False
 #   'Y'   -> Fy와 Ty 축만 사용
 #   'Z'   -> Fz와 Tz 축만 사용
 #   'ALL' -> 모든 힘/토크 축 사용
-AXIS_TEST_MODE = 'X'
+AXIS_TEST_MODE = 'ALL'
 
 
 # ===================================================================
@@ -309,7 +309,7 @@ def compensate_and_deadband(ft_raw, bias, enabled_indices):
 def update_virtual_target(virtual_pose, wrench_eff, dt, enabled_indices):
     # type: (List[float], List[float], float) -> List[float]
     """
-    유효 렌치값으로 가상 목표 포즈를 한 스텝 업데이트한다.
+    유효 렌치값으로 가상 목표 포즈를 한 Step 업데이트한다.
     각 축의 이동량은 안전 한계값으로 클리핑된다.
 
     반환:
@@ -331,7 +331,7 @@ def update_virtual_target(virtual_pose, wrench_eff, dt, enabled_indices):
     for i in range(3, 6):
         virtual_step[i] = clip(virtual_step[i], MAX_VIRTUAL_STEP_DEG)
 
-    # 활성화된 축만 가상 포즈에 누적; 비활성 축의 스텝은 0으로 리셋
+    # 활성화된 축만 가상 포즈에 누적; 비활성 축의 Step은 0으로 리셋
     enabled = set(enabled_indices)
     for i in range(6):
         if i in enabled:
@@ -345,7 +345,7 @@ def update_virtual_target(virtual_pose, wrench_eff, dt, enabled_indices):
 def compute_spring_damper_step(virtual_pose, command_pose, dt, enabled_indices):
     # type: (List[float], List[float], float) -> Tuple[List[float], List[float]]
     """
-    스프링-댐퍼 모델로 명령 포즈의 한 스텝 이동량을 계산한다.
+    스프링-댐퍼 모델로 명령 포즈의 한 Step 이동량을 계산한다.
     D * x_dot = K * (virtual - command) 식에서 x_dot = (K/D) * error 적용.
 
     반환:
@@ -364,16 +364,16 @@ def compute_spring_damper_step(virtual_pose, command_pose, dt, enabled_indices):
         ROT_STIFFNESS_RY / ROT_DAMPING_RY,
         ROT_STIFFNESS_RZ / ROT_DAMPING_RZ,
     ]
-    # 명령 스텝 = (K/D) * error * dt
+    # 명령 Step = (K/D) * error * dt
     command_step = [gains[i] * error[i] * dt for i in range(6)]
 
-    # 병진(0~2) 및 회전(3~5) 명령 스텝을 안전 한계로 클리핑
+    # 병진(0~2) 및 회전(3~5) 명령 Step을 안전 한계로 클리핑
     for i in range(3):
         command_step[i] = clip(command_step[i], MAX_COMMAND_STEP_MM)
     for i in range(3, 6):
         command_step[i] = clip(command_step[i], MAX_COMMAND_STEP_DEG)
 
-    # 비활성화 축의 오차와 스텝을 0으로 마스킹
+    # 비활성화 축의 오차와 Step을 0으로 마스킹
     enabled = set(enabled_indices)
     for i in range(6):
         if i not in enabled:
@@ -443,7 +443,7 @@ def log_status(ft_raw, ft_comp, wrench_eff, virtual_step, command_step,
         wrench_eff[3], wrench_eff[4], wrench_eff[5],
     )
     log.debug(
-        '[루프 %4d] 가상스텝=[%+.3f,%+.3f,%+.3f]mm/[%+.3f,%+.3f,%+.3f]deg '
+        '[루프 %4d] 가상Step=[%+.3f,%+.3f,%+.3f]mm/[%+.3f,%+.3f,%+.3f]deg '
         '오차=[%+.3f,%+.3f,%+.3f]mm/[%+.3f,%+.3f,%+.3f]deg',
         loop_count,
         virtual_step[0], virtual_step[1], virtual_step[2],
@@ -451,7 +451,7 @@ def log_status(ft_raw, ft_comp, wrench_eff, virtual_step, command_step,
         error[0], error[1], error[2], error[3], error[4], error[5],
     )
     log.debug(
-        '[루프 %4d] 명령스텝=[%+.3f,%+.3f,%+.3f]mm/[%+.3f,%+.3f,%+.3f]deg '
+        '[루프 %4d] 명령Step=[%+.3f,%+.3f,%+.3f]mm/[%+.3f,%+.3f,%+.3f]deg '
         '명령포즈=[%+.2f,%+.2f,%+.2f]mm/[%+.2f,%+.2f,%+.2f]deg 이동축=%s',
         loop_count,
         command_step[0], command_step[1], command_step[2],
@@ -581,12 +581,12 @@ def main():
 
             # 가상 목표 포즈 업데이트
             virtual_step = update_virtual_target(virtual_pose, wrench_eff, dt, enabled_indices)
-            # 스프링-댐퍼로 명령 스텝 계산
+            # 스프링-댐퍼로 명령 Step 계산
             command_step, error = compute_spring_damper_step(
                 virtual_pose, command_pose, dt, enabled_indices
             )
 
-            # 명령 포즈에 스텝 누적
+            # 명령 포즈에 Step 누적
             for i in range(6):
                 command_pose[i] += command_step[i]
 
