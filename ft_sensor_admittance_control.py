@@ -94,9 +94,9 @@ ROT_STIFFNESS = 0.10      # Nm/deg  (회전 강성) 0.10 0.05
 ROT_DAMPING = 0.1        # Nm*s/deg (회전 감쇠)
 
 # 제어 루프 1회당 안전 제한값 (한 루프에서 이 값 이상 이동 불가).
-MAX_VIRTUAL_STEP_MM = 5.0    # 가상 목표 최대 병진 이동량 (mm)
+MAX_VIRTUAL_STEP_MM = 10.0    # 가상 목표 최대 병진 이동량 (mm)
 MAX_VIRTUAL_STEP_DEG = 3.0   # 가상 목표 최대 회전량 (deg) 
-MAX_COMMAND_STEP_MM = 5.0    # 명령 포즈 최대 병진 이동량 (mm)
+MAX_COMMAND_STEP_MM = 10.0    # 명령 포즈 최대 병진 이동량 (mm)
 MAX_COMMAND_STEP_DEG = 3.0   # 명령 포즈 최대 회전량 (deg)
 
 TEL_VEL_RATIO = 0.5          # 텔레오퍼레이션 속도 비율 (0~1)
