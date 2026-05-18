@@ -19,6 +19,9 @@
 #     나중에 로봇 피드백 포즈가 필요한 경우, 스프링-댐퍼 오차 계산에서
 #     command_pose를 측정된 TCP 상대 포즈로 교체할 것.
 #
+#   로봇 속도 = (K/D)  ×   G   ×   힘
+#               ↑         ↑         ↑
+#            추종 감도  핸들 감도  내가 민 힘
 # ***********************************************************************
 
 from __future__ import annotations
@@ -49,7 +52,7 @@ CAN_BITRATE = 1_000_000       # CAN 통신 속도 (bps)
 CAN_ID_FORCE = 0x001          # 힘 데이터 CAN 메시지 ID
 CAN_ID_TORQUE = 0x002         # 토크 데이터 CAN 메시지 ID
 
-ROBOT_IP = '192.168.0.99'     # 로봇 IP 주소
+ROBOT_IP = '192.168.0.161'     # 로봇 IP 주소
 ROBOT_INDEX = 0               # 로봇 인덱스 번호
 
 # 이 값 하나로 디버깅 모드와 실제 제어 모드를 전환.
@@ -74,30 +77,30 @@ BIAS_SAMPLE_COUNT = 200       # Bias 측정에 사용할 샘플 수
 BIAS_SAMPLE_DELAY = 0.005     # 샘플 수집 간격 (초)
 
 # 입력 불감대(deadband): 이 범위 내의 값은 노이즈로 간주하여 무시.
-FORCE_THRESHOLD = 1.0        # N  (힘 불감대)
-TORQUE_THRESHOLD = 0.1     # Nm (회전 불감대)
+FORCE_THRESHOLD = 0.5        # N  (힘 불감대)
+TORQUE_THRESHOLD = 0.05     # Nm (회전 불감대)
 
 # 조작자의 렌치(wrench)가 가상 목표를 이동시키는 속도.
 # 로봇이 목표를 추종하기 전의 "핸들 감도" 역할.
-VIRTUAL_POINT_FORCE_GAIN = 10.0        # mm / (N*s)  (힘 → 가상 목표 이동 이득)
-VIRTUAL_POINT_TORQUE_GAIN = 3.0      # deg / (Nm*s) (토크 → 가상 목표 회전 이득)
+VIRTUAL_POINT_FORCE_GAIN = 3.0        # mm / (N*s)  (힘 → 가상 목표 이동 이득) 2 
+VIRTUAL_POINT_TORQUE_GAIN = 1.0      # deg / (Nm*s) (토크 → 가상 목표 회전 이득) 5
 
 # 스프링-댐퍼 추종 동역학: D * x_dot = K * error
 # K/D 비율이 클수록 가상 목표를 빠르게 추종함.
-STIFFNESS = 8.0            # N/mm  (병진 강성)
-DAMPING = 0.1             # N*s/mm (병진 감쇠)
+STIFFNESS = 1.0            # N/mm  (병진 강성) 1.0 0.25
+DAMPING = 0.5             # N*s/mm (병진 감쇠)
 
-ROT_STIFFNESS = 0.10      # Nm/deg  (회전 강성)
-ROT_DAMPING = 0.05        # Nm*s/deg (회전 감쇠)
+ROT_STIFFNESS = 0.10      # Nm/deg  (회전 강성) 0.10 0.05
+ROT_DAMPING = 0.01        # Nm*s/deg (회전 감쇠)
 
 # 제어 루프 1회당 안전 제한값 (한 루프에서 이 값 이상 이동 불가).
-MAX_VIRTUAL_STEP_MM = 10.0    # 가상 목표 최대 병진 이동량 (mm)
-MAX_VIRTUAL_STEP_DEG = 3.0   # 가상 목표 최대 회전량 (deg)
-MAX_COMMAND_STEP_MM = 10.0    # 명령 포즈 최대 병진 이동량 (mm)
-MAX_COMMAND_STEP_DEG = 3.0  # 명령 포즈 최대 회전량 (deg)
+MAX_VIRTUAL_STEP_MM = 5.0    # 가상 목표 최대 병진 이동량 (mm)
+MAX_VIRTUAL_STEP_DEG = 1.0   # 가상 목표 최대 회전량 (deg) 
+MAX_COMMAND_STEP_MM = 3.0    # 명령 포즈 최대 병진 이동량 (mm)
+MAX_COMMAND_STEP_DEG = 0.5   # 명령 포즈 최대 회전량 (deg)
 
-TEL_VEL_RATIO = 0.8          # 텔레오퍼레이션 속도 비율 (0~1)
-TEL_ACC_RATIO = 1.0          # 텔레오퍼레이션 가속도 비율 (0~1)
+TEL_VEL_RATIO = 0.5          # 텔레오퍼레이션 속도 비율 (0~1)
+TEL_ACC_RATIO = 0.5          # 텔레오퍼레이션 가속도 비율 (0~1)
 
 CONTROL_PERIOD = 0.02        # 제어 루프 주기 (초, 50 Hz)
 MAX_DT = CONTROL_PERIOD * 2  # dt 스파이크 허용 최대값; 초과 시 명목 주기로 대체
