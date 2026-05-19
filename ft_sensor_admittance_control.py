@@ -77,13 +77,16 @@ BIAS_SAMPLE_COUNT = 200       # Bias 측정에 사용할 샘플 수
 BIAS_SAMPLE_DELAY = 0.005     # 샘플 수집 간격 (초)
 
 # 입력 불감대(deadband): 이 범위 내의 값은 노이즈로 간주하여 무시.
-FORCE_THRESHOLD = 2.0        # N  (힘 불감대)
-TORQUE_THRESHOLD = 1.0    # Nm (회전 불감대)
+FORCE_THRESHOLD = 0.5        # N  (힘 불감대)
+TORQUE_THRESHOLD = 0.05     # Nm (회전 불감대)
+# 상한 클리핑 설정 (이 값 초과 시 노이즈/충격으로 간주하여 무시)
+FORCE_MAX         = 20.0   # N  (예: 20N 이상은 무시)
+TORQUE_MAX        = 2.0    # Nm (예: 2Nm 이상은 무시)
 
 # 조작자의 렌치(wrench)가 가상 목표를 이동시키는 속도.
 # 로봇이 목표를 추종하기 전의 "핸들 감도" 역할.
-VIRTUAL_POINT_FORCE_GAIN = 5.0        # mm / (N*s)  (힘 → 가상 목표 이동 이득)
-VIRTUAL_POINT_TORQUE_GAIN = 5.0      # deg / (Nm*s) (토크 → 가상 목표 회전 이득)
+VIRTUAL_POINT_FORCE_GAIN = 8.0        # mm / (N*s)  (힘 → 가상 목표 이동 이득)
+VIRTUAL_POINT_TORQUE_GAIN = 8.0      # deg / (Nm*s) (토크 → 가상 목표 회전 이득)
 
 # 스프링-댐퍼 추종 동역학: D * x_dot = K * error
 # K/D 비율이 클수록 가상 목표를 빠르게 추종함.
@@ -95,9 +98,9 @@ ROT_DAMPING = 0.5        # Nm*s/deg (회전 감쇠)
 
 # 제어 루프 1회당 안전 제한값 (한 루프에서 이 값 이상 이동 불가).
 MAX_VIRTUAL_STEP_MM = 10.0    # 가상 목표 최대 병진 이동량 (mm)
-MAX_VIRTUAL_STEP_DEG = 3.0   # 가상 목표 최대 회전량 (deg) 
-MAX_COMMAND_STEP_MM = 5.0    # 명령 포즈 최대 병진 이동량 (mm)
-MAX_COMMAND_STEP_DEG = 1.5   # 명령 포즈 최대 회전량 (deg)
+MAX_VIRTUAL_STEP_DEG = 1.0   # 가상 목표 최대 회전량 (deg) 
+MAX_COMMAND_STEP_MM = 10.0    # 명령 포즈 최대 병진 이동량 (mm)
+MAX_COMMAND_STEP_DEG = 0.5   # 명령 포즈 최대 회전량 (deg)
 
 TEL_VEL_RATIO = 0.5          # 텔레오퍼레이션 속도 비율 (0~1)
 TEL_ACC_RATIO = 0.5          # 텔레오퍼레이션 가속도 비율 (0~1)
@@ -231,34 +234,69 @@ def clip(val, limit):
     return max(-limit, min(limit, val))
 
 
-def deadband(val, threshold, soft_range: float = None):
-    """
-    Soft Deadband 처리:
-    - |val| < threshold → 0 반환 (불감대 내)
-    - threshold <= |val| < threshold + soft_range → 0에서 선형 증가 (부드러운 전환 구간)
-    - |val| >= threshold + soft_range → threshold만큼 차감한 값 반환 (기존 hard deadband와 동일)
+# def deadband(val, threshold, soft_range: float = None):
+#     """
+#     Soft Deadband 처리:
+#     - |val| < threshold → 0 반환 (불감대 내)
+#     - threshold <= |val| < threshold + soft_range → 0에서 선형 증가 (부드러운 전환 구간)
+#     - |val| >= threshold + soft_range → threshold만큼 차감한 값 반환 (기존 hard deadband와 동일)
 
-    soft_range가 None이면 threshold의 50%를 사용 (권장).
+#     soft_range가 None이면 threshold의 50%를 사용 (권장).
+#     """
+#     if soft_range is None:
+#         soft_range = threshold * 0.5  # 전환 구간 = deadband의 절반
+
+#     abs_val = abs(val)
+
+#     if abs_val < threshold:
+#         return 0.0
+
+#     # soft_range 구간: 0에서 선형으로 출력 증가
+#     if abs_val < threshold + soft_range:
+#         # 전환 구간 내에서 0~1로 정규화 후 스케일
+#         t = (abs_val - threshold) / soft_range  # 0.0 ~ 1.0
+#         output = t * soft_range
+#     else:
+#         # 완전히 deadband를 벗어난 구간: 기존과 동일하게 threshold 차감
+#         output = abs_val - threshold
+
+#     return output if val > 0 else -output
+
+def deadband(val, threshold, soft_range: float = None, max_val: float = None):
+    """
+    Soft Deadband + 상한 클리핑 처리:
+    - |val| > max_val              → 0 반환 (상한 초과, 충격/오류로 간주)
+    - |val| < threshold            → 0 반환 (하한 불감대)
+    - threshold <= |val| < threshold + soft_range → 선형 전환
+    - |val| >= threshold + soft_range → threshold 차감 후 반환
+
+    Args:
+        val:        입력값 (힘 or 토크)
+        threshold:  하한 불감대 크기
+        soft_range: 전환 구간 크기 (None이면 threshold * 0.5 사용)
+        max_val:    상한 클리핑 값 (None이면 클리핑 없음)
     """
     if soft_range is None:
-        soft_range = threshold * 0.5  # 전환 구간 = deadband의 절반
+        soft_range = threshold * 0.5
 
     abs_val = abs(val)
 
+    # ── 상한 클리핑: 비정상적으로 큰 값 무시 ──
+    if max_val is not None and abs_val > max_val:
+        return 0.0
+
+    # ── 하한 불감대 ──
     if abs_val < threshold:
         return 0.0
 
-    # soft_range 구간: 0에서 선형으로 출력 증가
+    # ── Soft transition 구간 ──
     if abs_val < threshold + soft_range:
-        # 전환 구간 내에서 0~1로 정규화 후 스케일
         t = (abs_val - threshold) / soft_range  # 0.0 ~ 1.0
         output = t * soft_range
     else:
-        # 완전히 deadband를 벗어난 구간: 기존과 동일하게 threshold 차감
         output = abs_val - threshold
 
     return output if val > 0 else -output
-
 
 def get_enabled_axis_indices():
     """AXIS_TEST_MODE 설정에 따라 활성화할 축 인덱스 tuple을 반환한다."""
