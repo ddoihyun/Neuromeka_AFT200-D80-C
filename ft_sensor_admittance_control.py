@@ -77,27 +77,27 @@ BIAS_SAMPLE_COUNT = 200       # Bias 측정에 사용할 샘플 수
 BIAS_SAMPLE_DELAY = 0.005     # 샘플 수집 간격 (초)
 
 # 입력 불감대(deadband): 이 범위 내의 값은 노이즈로 간주하여 무시.
-FORCE_THRESHOLD = 0.5        # N  (힘 불감대)
-TORQUE_THRESHOLD = 0.05     # Nm (회전 불감대)
+FORCE_THRESHOLD = 2.0        # N  (힘 불감대)
+TORQUE_THRESHOLD = 1.0    # Nm (회전 불감대)
 
 # 조작자의 렌치(wrench)가 가상 목표를 이동시키는 속도.
 # 로봇이 목표를 추종하기 전의 "핸들 감도" 역할.
-VIRTUAL_POINT_FORCE_GAIN = 5.0        # mm / (N*s)  (힘 → 가상 목표 이동 이득) 2 
-VIRTUAL_POINT_TORQUE_GAIN = 3.0      # deg / (Nm*s) (토크 → 가상 목표 회전 이득) 5
+VIRTUAL_POINT_FORCE_GAIN = 5.0        # mm / (N*s)  (힘 → 가상 목표 이동 이득)
+VIRTUAL_POINT_TORQUE_GAIN = 5.0      # deg / (Nm*s) (토크 → 가상 목표 회전 이득)
 
 # 스프링-댐퍼 추종 동역학: D * x_dot = K * error
 # K/D 비율이 클수록 가상 목표를 빠르게 추종함.
-STIFFNESS = 1.0            # N/mm  (병진 강성) 1.0 0.25
+STIFFNESS = 1.5            # N/mm  (병진 강성)
 DAMPING = 0.5             # N*s/mm (병진 감쇠)
 
-ROT_STIFFNESS = 0.10      # Nm/deg  (회전 강성) 0.10 0.05
-ROT_DAMPING = 0.1        # Nm*s/deg (회전 감쇠)
+ROT_STIFFNESS = 1.5      # Nm/deg  (회전 강성)
+ROT_DAMPING = 0.5        # Nm*s/deg (회전 감쇠)
 
 # 제어 루프 1회당 안전 제한값 (한 루프에서 이 값 이상 이동 불가).
 MAX_VIRTUAL_STEP_MM = 10.0    # 가상 목표 최대 병진 이동량 (mm)
 MAX_VIRTUAL_STEP_DEG = 3.0   # 가상 목표 최대 회전량 (deg) 
-MAX_COMMAND_STEP_MM = 10.0    # 명령 포즈 최대 병진 이동량 (mm)
-MAX_COMMAND_STEP_DEG = 3.0   # 명령 포즈 최대 회전량 (deg)
+MAX_COMMAND_STEP_MM = 5.0    # 명령 포즈 최대 병진 이동량 (mm)
+MAX_COMMAND_STEP_DEG = 1.5   # 명령 포즈 최대 회전량 (deg)
 
 TEL_VEL_RATIO = 0.5          # 텔레오퍼레이션 속도 비율 (0~1)
 TEL_ACC_RATIO = 0.5          # 텔레오퍼레이션 가속도 비율 (0~1)
@@ -231,11 +231,33 @@ def clip(val, limit):
     return max(-limit, min(limit, val))
 
 
-def deadband(val, threshold):
-    """불감대 처리: |val| < threshold이면 0 반환, 아니면 threshold만큼 차감한 값 반환."""
-    if abs(val) < threshold:
+def deadband(val, threshold, soft_range: float = None):
+    """
+    Soft Deadband 처리:
+    - |val| < threshold → 0 반환 (불감대 내)
+    - threshold <= |val| < threshold + soft_range → 0에서 선형 증가 (부드러운 전환 구간)
+    - |val| >= threshold + soft_range → threshold만큼 차감한 값 반환 (기존 hard deadband와 동일)
+
+    soft_range가 None이면 threshold의 50%를 사용 (권장).
+    """
+    if soft_range is None:
+        soft_range = threshold * 0.5  # 전환 구간 = deadband의 절반
+
+    abs_val = abs(val)
+
+    if abs_val < threshold:
         return 0.0
-    return (val - threshold) if val > 0 else (val + threshold)
+
+    # soft_range 구간: 0에서 선형으로 출력 증가
+    if abs_val < threshold + soft_range:
+        # 전환 구간 내에서 0~1로 정규화 후 스케일
+        t = (abs_val - threshold) / soft_range  # 0.0 ~ 1.0
+        output = t * soft_range
+    else:
+        # 완전히 deadband를 벗어난 구간: 기존과 동일하게 threshold 차감
+        output = abs_val - threshold
+
+    return output if val > 0 else -output
 
 
 def get_enabled_axis_indices():
