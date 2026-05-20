@@ -78,6 +78,11 @@ class RobotConfig:
     vel_ratio: float
     acc_ratio: float
 
+@dataclass(frozen=True)
+class LogConfig:
+    log_level: str
+    log_to_file: bool
+    log_output_dir: str
 
 @dataclass(frozen=True)
 class CommonControlConfig:
@@ -98,6 +103,7 @@ class ControlConfig:
 class AppConfig:
     can: CanConfig
     robot: RobotConfig
+    log: LogConfig
     control: ControlConfig
 
 
@@ -107,6 +113,7 @@ def load_config(config_path: Path) -> AppConfig:
 
     can_cfg = data['can']
     robot_cfg = data['robot']
+    log_cfg = data['logging']
     control_cfg = data['control']
     common_cfg = control_cfg['common']
     tracking_cfg = control_cfg['tracking_rate']
@@ -126,6 +133,11 @@ def load_config(config_path: Path) -> AppConfig:
             teleop_start_mode=int(robot_cfg['teleop_start_mode']),
             vel_ratio=float(robot_cfg['vel_ratio']),
             acc_ratio=float(robot_cfg['acc_ratio']),
+        ),
+        log=LogConfig(
+            log_level = log_cfg['log_level'],
+            log_to_file = log_cfg['log_to_file'],
+            log_output_dir = log_cfg['log_output_dir'],
         ),
         control=ControlConfig(
             common=CommonControlConfig(
@@ -165,16 +177,27 @@ def resolve_config_path(argv: Sequence[str]) -> Path:
     return Path(argv[0]).expanduser()
 
 
-def setup_logging() -> None:
+def setup_logging(config: "LogConfig | None" = None) -> None:
+    level = logging.INFO
+    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
+
+    if config is not None:
+        level = getattr(logging, config.log_level.upper(), logging.INFO)
+
+        if config.log_to_file:
+            log_dir = Path(config.log_output_dir)
+            log_dir.mkdir(parents=True, exist_ok=True)
+            handlers.append(
+                logging.FileHandler(log_dir / "app.log", encoding="utf-8")
+            )
+
     logging.basicConfig(
-        level=logging.INFO,
-        format='[%(asctime)s] %(levelname)s %(message)s',
-        datefmt='%H:%M:%S',
-        handlers=[logging.StreamHandler(sys.stdout)],
+        level=level,
+        format="%(asctime)s %(levelname)s %(message)s",
+        datefmt="%H:%M:%S",
+        handlers=handlers,
         # force=True,
     )
-
-
 # ===================================================================
 # F/T sensor reader
 # ===================================================================
@@ -378,9 +401,20 @@ def check_robot_connection(indy):
         log.error('Robot connection check failed: %s', e)
         return False
 
+def log_config_summary(config: AppConfig, config_path: Path) -> None:
+    log.info('=' * 70)
+    log.info('6-axis damping-only admittance controller started')
+    log.info('Config: %s', config_path)
+    log.info('Robot command mode: %s',
+             'APPLY' if config.robot.apply_robot_commands else 'DEBUG_ONLY')
+    log.info('Admittance mode: damping_only')
+    log.info('Damping=%.3f', config.control.damping)
+    log.info('Force threshold=%.3fN', config.control.common.force_threshold)
+    log.info('Sensor stale timeout=%.3fs', config.control.common.stale_sensor_timeout_sec)
+    log.info('=' * 70)
 
 def log_status(ft_raw, ft_comp, virtual_step, command_step,
-               virtual_pose, command_pose, error, loop_count):
+               virtual_pose, command_pose, error, loop_count, indy):
     if loop_count % 10 != 0:
         return
 
@@ -430,6 +464,17 @@ def log_status(ft_raw, ft_comp, virtual_step, command_step,
         virtual_pose[0], virtual_pose[1], virtual_pose[2],
         virtual_pose[3], virtual_pose[4], virtual_pose[5],
     )
+    if indy is not None:
+        try:
+            ctrl_state = indy.get_control_state()
+            q = ctrl_state['q']
+            p = ctrl_state['p']
+            log.debug('[Loop %4d] Joint q=[%s]', loop_count,
+                      ', '.join(f'{v:.3f}' for v in q))
+            log.debug('[Loop %4d] Pose  p=[%s]', loop_count,
+                      ', '.join(f'{v:.3f}' for v in p))
+        except Exception as e:
+            log.warning('get_control_state failed: %s', e)
 
 
 def log_config_summary(config: AppConfig, config_path: Path) -> None:
@@ -462,7 +507,7 @@ def main(argv: Optional[Sequence[str]] = None):
         log.error('Configuration load failed: %s', e)
         return
 
-    setup_logging()
+    setup_logging(config.log)
     log_config_summary(config, config_path)
 
     sensor = FTSensorReader(config.can)
@@ -585,7 +630,7 @@ def main(argv: Optional[Sequence[str]] = None):
 
             log_status(
                 ft_raw, ft_comp, virtual_step, command_step,
-                virtual_pose, command_pose, error, loop_count
+                virtual_pose, command_pose, error, loop_count, indy
             )
 
             if config.robot.apply_robot_commands:

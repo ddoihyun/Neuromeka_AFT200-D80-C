@@ -1,7 +1,7 @@
 {
   "can": {
     "interface": "slcan",
-    "channel": "COM3",
+    "channel": "/dev/ttyUSB0",
     "bitrate": 1000000,
     "force_id": 1,
     "torque_id": 2
@@ -14,18 +14,23 @@
     "vel_ratio": 0.5,
     "acc_ratio": 1.0
   },
+  "logging": { 
+    "log_level": "DEBUG",
+    "log_to_file": true,
+    "log_output_dir": "logs"
+  },
   "control": {
     "common": {
       "period_sec": 0.01,
       "bias_sample_count": 200,
       "stale_sensor_timeout_sec": 0.2,
-      "force_threshold": 1.0,
+      "force_threshold": 2.0,
       "release_hold_sec": 0.05
     },
-    "tracking_rate": {
-      "tracking_rate": 3.0
+  "tracking_rate": {
+      "tracking_rate": 10.0
     },
-    "damping": {
+  "damping": {
       "damping": 1.0
     }
   }
