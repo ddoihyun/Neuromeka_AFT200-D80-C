@@ -1,6 +1,6 @@
 # ***********************************************************************
 #
-# 6-axis F/T damping-only admittance controller for Indy teleoperation.
+# 6-axis F/T damping-only admittance controller for Nuri Robot teleoperation.
 #
 # Control idea:
 #   1. Bias-compensated force/torque is converted directly to
@@ -15,7 +15,7 @@
 #
 # Notes:
 #   - Translation units are mm.
-#   - Rotation units are assumed to be deg for Indy task poses.
+#   - Rotation units are assumed to be deg for Nuri Robot task poses.
 #   - The real TCP pose is approximated by the last commanded relative pose.
 #     If robot feedback pose is needed later, compare command_pose with the
 #     measured TCP-relative pose for safety monitoring.
@@ -29,6 +29,7 @@ import logging
 import sys
 import threading
 import time
+from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence
@@ -91,6 +92,7 @@ class CommonControlConfig:
     bias_sample_count: int
     stale_sensor_timeout_sec: float
     force_threshold: float
+    force_release_threshold: float
     release_hold_sec: float
 
 
@@ -146,11 +148,13 @@ def load_config(config_path: Path) -> AppConfig:
                 bias_sample_count=int(common_cfg['bias_sample_count']),
                 stale_sensor_timeout_sec=float(common_cfg['stale_sensor_timeout_sec']),
                 force_threshold=float(common_cfg['force_threshold']),
+                force_release_threshold=float(common_cfg['force_release_threshold']),
                 release_hold_sec=float(common_cfg['release_hold_sec']),
             ),
-            damping=float(damping_cfg['damping']),
+        damping=float(damping_cfg['damping']),
         ),
     )
+    
     if config.control.common.bias_sample_count <= 0:
         raise ValueError('control.common.bias_sample_count must be positive')
     if config.control.common.period_sec <= 0.0:
@@ -176,26 +180,28 @@ def resolve_config_path(argv: Sequence[str]) -> Path:
     return Path(argv[0]).expanduser()
 
 
-def setup_logging(config: "LogConfig | None" = None) -> None:
-    level = logging.INFO 
+def setup_logging(script_name: str, config: 'LogConfig | None' = None) -> None:
+    level = logging.INFO
     handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
-
+ 
     if config is not None:
         level = getattr(logging, config.log_level.upper(), logging.INFO)
-
+ 
         if config.log_to_file:
             log_dir = Path(config.log_output_dir)
             log_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            log_filename = log_dir / '{}_{}.log'.format(script_name, timestamp)
             handlers.append(
-                logging.FileHandler(log_dir / "app.log", encoding="utf-8")
+                logging.FileHandler(log_filename, encoding='utf-8')
             )
-
+            print('Log file: {}'.format(log_filename))
+ 
     logging.basicConfig(
         level=level,
-        format="%(asctime)s %(levelname)s %(message)s",
-        datefmt="%H:%M:%S",
+        format='%(asctime)s %(levelname)s %(message)s',
+        datefmt='%H:%M:%S',
         handlers=handlers,
-        # force=True,
     )
 
 # ===================================================================
@@ -353,6 +359,23 @@ def compute_damping_step(
 
     return command_step, command_velocity
 
+def stop_robot_at_current_pose(indy, config):
+    try:
+        current_p = indy.get_control_state()['p']
+        indy.control.MoveTeleL(
+            control_msgs.MoveTeleLReq(
+                tpos=current_p,
+                vel_ratio=config.robot.vel_ratio,
+                acc_ratio=config.robot.acc_ratio,
+                method=control_msgs.TELE_TASK_ABSOLUTE,
+            )
+        )
+        log.info('[Stop] Locked at absolute pose: '
+                 'X=%.2f Y=%.2f Z=%.2f mm, Rx=%.2f Ry=%.2f Rz=%.2f deg',
+                 current_p[0], current_p[1], current_p[2],
+                 current_p[3], current_p[4], current_p[5])
+    except Exception as e:
+        log.warning('[Stop] stop_robot_at_current_pose failed: %s', e)
 
 def check_robot_connection(indy):
     try:
@@ -434,13 +457,11 @@ def log_status(ft_raw, ft_comp, command_velocity, command_step,
             q = ctrl_state['q']
             p = ctrl_state['p']
             log.debug(
-                '[Loop %4d] Joint q=[%s]',
-                loop_count,
+                '[Loop %4d] Joint q=[%s]', loop_count,
                 ', '.join(f'{v:.3f}' for v in q),
             )
             log.debug(
-                '[Loop %4d] Pose  p=[%s]',
-                loop_count,
+                '[Loop %4d] Pose  p=[%s]', loop_count,
                 ', '.join(f'{v:.3f}' for v in p),
             )
         except Exception as e:
@@ -460,7 +481,7 @@ def main(argv: Optional[Sequence[str]] = None):
         log.error('Configuration load failed: %s', e)
         return
 
-    setup_logging(config.log)
+    setup_logging('dample_ver', config.log)
     log_config_summary(config, config_path)
 
     sensor = FTSensorReader(config.can)
@@ -529,6 +550,7 @@ def main(argv: Optional[Sequence[str]] = None):
 
     loop_count = 0
     command_pose = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    was_force_detected = False
     prev_time = time.monotonic()
 
     log.info('Control loop started. Press Ctrl+C to stop.')
@@ -558,12 +580,34 @@ def main(argv: Optional[Sequence[str]] = None):
                     dt,
                     config.control,
                 )
+                for i in range(6):
+                    command_pose[i] += command_step[i]
+
+                if config.robot.apply_robot_commands:
+                    try:
+                        indy.control.MoveTeleL(
+                            control_msgs.MoveTeleLReq(
+                                tpos=command_pose,
+                                vel_ratio=config.robot.vel_ratio,
+                                acc_ratio=config.robot.acc_ratio,
+                                method=control_msgs.TELE_TASK_TCP,
+                            )
+                        )
+                    except Exception as e:
+                        log.error('MoveTeleL(TCP) error: %s', e)
+                        if not check_robot_connection(indy):
+                            log.error('Robot connection abnormal; stopping control loop')
+                            break
+                was_force_detected = True
+
             else:
-                command_step = [0.0] * 6
+                command_step    = [0.0] * 6
                 command_velocity = [0.0] * 6
 
-            for i in range(6):
-                command_pose[i] += command_step[i]
+                if was_force_detected:
+                    if config.robot.apply_robot_commands:
+                        stop_robot_at_current_pose(indy, config)
+                    was_force_detected = False
 
             log_status(ft_raw, ft_comp, command_velocity, command_step, command_pose, loop_count, indy)
 
