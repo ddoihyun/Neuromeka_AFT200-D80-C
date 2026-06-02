@@ -1,0 +1,77 @@
+{
+  "can": {
+    "interface": "slcan",
+    "channel": "/dev/ttyUSB0",
+    "bitrate": 1000000,
+    "force_id": 1,
+    "torque_id": 2
+  },
+  "robot": {
+    "ip": "192.168.0.86",
+    "index": 0,
+    "apply_robot_commands": true,
+    "teleop_start_mode": 2,
+    "vel_ratio": 0.5,
+    "acc_ratio": 1.0
+  },
+  "op_state": {
+      "allowed_states": [17, 6],
+      "state_names": {
+        "0":  "SYSTEM_OFF",
+        "1":  "SYSTEM_ON",
+        "2":  "VIOLATE",
+        "3":  "RECOVER_HARD",
+        "4":  "RECOVER_SOFT",
+        "5":  "IDLE",
+        "6":  "MOVING",
+        "7":  "TEACHING",
+        "8":  "COLLISION",
+        "9":  "STOP_AND_OFF",
+        "10": "COMPLIANCE",
+        "11": "BRAKE_CONTROL",
+        "12": "SYSTEM_RESET",
+        "13": "SYSTEM_SWITCH",
+        "15": "VIOLATE_HARD",
+        "16": "MANUAL_RECOVER",
+        "17": "TELE_OP",
+        "-1": "UNKNOWN"
+        }
+  },
+  "logging": { 
+    "log_level": "DEBUG",
+    "log_to_file": true,
+    "log_output_dir": "logs"
+  },
+  "control": {
+    "common": {
+      "period_sec": 0.01,
+      "bias_sample_count": 200,
+      "stale_sensor_timeout_sec": 0.2,
+      "force_threshold": 2.0,
+      "force_release_threshold": 1.0,
+      "release_hold_sec": 0.3
+    },
+  "tracking_rate": {
+      "tracking_rate": 30.0
+    },
+  "damping": {
+    "damping_force": 0.4,
+    "damping_torque": 1.0
+    },
+  "protection": {
+      "enabled": true,
+      "update_interval_loops": 50,
+      "singularity_log_interval_loops": 50,
+      "damping_force_min": 0.4,
+      "damping_force_max": 0.6,
+      "damping_torque_min": 0.7,
+      "damping_torque_max": 1.0,
+      "cond_slow": 10000.0,
+      "cond_strong": 100000.0,
+      "cond_stop": 1000000.0,
+      "sigma_slow": 0.001,
+      "sigma_strong": 0.0001,
+      "sigma_stop": 0.00001
+    }
+  }
+}
