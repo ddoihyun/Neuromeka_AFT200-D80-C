@@ -77,16 +77,16 @@ BIAS_SAMPLE_COUNT = 200       # Bias 측정에 사용할 샘플 수
 BIAS_SAMPLE_DELAY = 0.005     # 샘플 수집 간격 (초)
 
 # 입력 불감대(deadband): 이 범위 내의 값은 노이즈로 간주하여 무시.
-FORCE_THRESHOLD = 0.5        # N  (힘 불감대)
-TORQUE_THRESHOLD = 0.05     # Nm (회전 불감대)
+FORCE_THRESHOLD = 2.0        # N  (힘 불감대)
+TORQUE_THRESHOLD = 0.5     # Nm (회전 불감대)
 # 상한 클리핑 설정 (이 값 초과 시 노이즈/충격으로 간주하여 무시)
-FORCE_MAX         = 20.0   # N  (예: 20N 이상은 무시)
-TORQUE_MAX        = 2.0    # Nm (예: 2Nm 이상은 무시)
+FORCE_MAX         = 30.0   # N  (예: 20N 이상은 무시)
+TORQUE_MAX        = 5.0    # Nm (예: 5Nm 이상은 무시)
 
 # 조작자의 렌치(wrench)가 가상 목표를 이동시키는 속도.
 # 로봇이 목표를 추종하기 전의 "핸들 감도" 역할.
-VIRTUAL_POINT_FORCE_GAIN = 8.0        # mm / (N*s)  (힘 → 가상 목표 이동 이득)
-VIRTUAL_POINT_TORQUE_GAIN = 8.0      # deg / (Nm*s) (토크 → 가상 목표 회전 이득)
+VIRTUAL_POINT_FORCE_GAIN = 5.0        # mm / (N*s)  (힘 → 가상 목표 이동 이득)
+VIRTUAL_POINT_TORQUE_GAIN = 5.0      # deg / (Nm*s) (토크 → 가상 목표 회전 이득)
 
 # 스프링-댐퍼 추종 동역학: D * x_dot = K * error
 # K/D 비율이 클수록 가상 목표를 빠르게 추종함.
@@ -99,11 +99,11 @@ ROT_DAMPING = 0.5        # Nm*s/deg (회전 감쇠)
 # 제어 루프 1회당 안전 제한값 (한 루프에서 이 값 이상 이동 불가).
 MAX_VIRTUAL_STEP_MM = 10.0    # 가상 목표 최대 병진 이동량 (mm)
 MAX_VIRTUAL_STEP_DEG = 1.0   # 가상 목표 최대 회전량 (deg) 
-MAX_COMMAND_STEP_MM = 10.0    # 명령 포즈 최대 병진 이동량 (mm)
+MAX_COMMAND_STEP_MM = 5.0    # 명령 포즈 최대 병진 이동량 (mm)
 MAX_COMMAND_STEP_DEG = 0.5   # 명령 포즈 최대 회전량 (deg)
 
 TEL_VEL_RATIO = 0.5          # 텔레오퍼레이션 속도 비율 (0~1)
-TEL_ACC_RATIO = 0.5          # 텔레오퍼레이션 가속도 비율 (0~1)
+TEL_ACC_RATIO = 0.1          # 텔레오퍼레이션 가속도 비율 (0~1)
 
 CONTROL_PERIOD = 0.02        # 제어 루프 주기 (초, 50 Hz)
 MAX_DT = CONTROL_PERIOD * 2  # dt 스파이크 허용 최대값; 초과 시 명목 주기로 대체
